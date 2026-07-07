@@ -904,6 +904,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.vad_min_silence_duration_ms = form_int(req, "vad_min_silence_duration_ms", rp.vad_min_silence_duration_ms);
         rp.vad_max_speech_duration_s = form_float(req, "vad_max_speech_duration_s", rp.vad_max_speech_duration_s);
         rp.vad_speech_pad_ms = form_int(req, "vad_speech_pad_ms", rp.vad_speech_pad_ms);
+        rp.vad_no_merge = form_bool(req, "vad_no_merge", rp.vad_no_merge);
         rp.hotwords = form_string(req, "hotwords", rp.hotwords);
         rp.hotwords_boost = form_float(req, "hotwords_boost", rp.hotwords_boost);
         rp.temperature = form_float(req, "temperature", rp.temperature);
@@ -1063,6 +1064,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.vad_min_silence_duration_ms = form_int(req, "vad_min_silence_duration_ms", rp.vad_min_silence_duration_ms);
         rp.vad_max_speech_duration_s = form_float(req, "vad_max_speech_duration_s", rp.vad_max_speech_duration_s);
         rp.vad_speech_pad_ms = form_int(req, "vad_speech_pad_ms", rp.vad_speech_pad_ms);
+        rp.vad_no_merge = form_bool(req, "vad_no_merge", rp.vad_no_merge);
         rp.hotwords = form_string(req, "hotwords", rp.hotwords);
         rp.hotwords_boost = form_float(req, "hotwords_boost", rp.hotwords_boost);
         rp.suppress_regex = form_string(req, "suppress_regex", rp.suppress_regex);

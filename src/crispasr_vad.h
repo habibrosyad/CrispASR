@@ -47,6 +47,7 @@ struct crispasr_stitched_audio {
 enum class crispasr_vad_post_merge_policy {
     offline = 0,
     streaming_json = 1,
+    none = 2,
 };
 
 // Plain options struct: no CLI dependency. Mirrors the VAD tunables plus the
@@ -92,6 +93,9 @@ inline std::vector<crispasr_audio_slice> crispasr_post_merge_vad_slices(const st
 
     std::vector<crispasr_audio_slice> merged;
     merged.push_back(slices[0]);
+
+    if (opts.post_merge_policy == crispasr_vad_post_merge_policy::none)
+        return slices;
 
     if (opts.post_merge_policy == crispasr_vad_post_merge_policy::streaming_json) {
         const int effective_gap_ms =

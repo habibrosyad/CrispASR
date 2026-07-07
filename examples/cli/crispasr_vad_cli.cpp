@@ -83,6 +83,8 @@ std::vector<crispasr_audio_slice> crispasr_compute_audio_slices(const float* sam
         opts.speech_pad_ms = params.vad_speech_pad_ms;
         opts.chunk_seconds = chunk_seconds;
         opts.n_threads = params.n_threads;
+        if (params.vad_no_merge)
+            opts.post_merge_policy = crispasr_vad_post_merge_policy::none;
         auto slices = crispasr_compute_vad_slices(samples, n_samples, sample_rate, vad_path.c_str(), opts);
         if (!slices.empty())
             return slices;
