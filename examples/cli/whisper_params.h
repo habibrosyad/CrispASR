@@ -102,7 +102,6 @@ struct whisper_params {
     int vad_speech_pad_ms = 30;
     float vad_samples_overlap = 0.1f;
     bool vad_stitch = false;
-    bool vad_no_merge = false;
 
     std::string backend;
     std::string source_lang;

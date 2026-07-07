@@ -755,8 +755,6 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.vad_samples_overlap = std::stof(ARGV_NEXT);
     } else if (arg == "--vad-stitch") {
         params.vad_stitch = true;
-    } else if (arg == "--vad-no-merge") {
-        params.vad_no_merge = true;
     } else {
         return false;
     }
@@ -1257,9 +1255,6 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr,
             "  -vo N,     --vad-samples-overlap         N [%-7.2f] VAD samples overlap (seconds between segments)\n",
             params.vad_samples_overlap);
-    fprintf(stderr,
-            "             --vad-no-merge                   [%-7s] skip post-VAD slice merging (retain all VAD segments)\n",
-            params.vad_no_merge ? "true" : "false");
     fprintf(stderr, "\n");
 }
 
