@@ -482,11 +482,16 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     rp.force_aligner ? 1 : 0, want_align ? 1 : 0);
         }
 
-        // Stitching path: combine all VAD slices into one contiguous buffer
-        // (with 0.1s silence gaps) and transcribe as a single call — matches
-        // the CLI's historical whisper VAD path and preserves cross-segment
-        // context. Only applies when VAD produces multiple slices.
-        if (had_vad && slices.size() > 1) {
+        // Stitching path: combine VAD slices into one buffer with 0.1s silence
+        // gaps and transcribe as a single call — matches the CLI's historical
+        // whisper VAD path and preserves cross-segment context. Only applies
+        // for audio up to 600 s to avoid OOM from the stitched buffer.
+        // Beyond that, or without VAD, fall back to per-slice transcription.
+        const double max_stitch_duration_s = 600.0;
+        const bool use_stitch = had_vad && slices.size() > 1 &&
+            (double)n_samples / SR <= max_stitch_duration_s;
+
+        if (use_stitch) {
             auto stitched = crispasr_stitch_vad_slices(pcmf32.data(), n_samples, SR, slices);
             if (!rp.no_prints) {
                 fprintf(stderr, "crispasr-server: stitched %zu VAD segments -> %.1fs (from %.1fs original)\n",
@@ -541,32 +546,42 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                         (stitched.total_duration_cs / 100.0) / std::max(elapsed, 0.001));
             }
         } else {
-            // Single slice or no VAD — transcribe directly.
-            auto tc0 = std::chrono::steady_clock::now();
-            auto segs = backend->transcribe(pcmf32.data(), n_samples, 0, rp);
+            // Per-slice transcription (original path).
+            // This is the fallback for:
+            //   - No VAD (energy-chunked slices)
+            //   - Single VAD segment
+            //   - VAD audio too long for stitching (avoids OOM)
+            if (!rp.no_prints) {
+                fprintf(stderr, "crispasr-server: transcribing %zu slice(s) individually\n", slices.size());
+            }
+            for (size_t i = 0; i < slices.size(); ++i) {
+                const auto& sl = slices[i];
+                auto tc0 = std::chrono::steady_clock::now();
+                auto segs = backend->transcribe(pcmf32.data() + sl.start, sl.end - sl.start, sl.t0_cs, rp);
 
-            if (want_align) {
-                for (auto& seg : segs) {
-                    if (!seg.words.empty() && !rp.force_aligner)
-                        continue;
-                    auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data(),
-                                                    n_samples, 0, rp.n_threads);
-                    if (!words.empty()) {
-                        seg.t0 = words.front().t0;
-                        seg.t1 = words.back().t1;
-                        seg.words = std::move(words);
+                if (want_align) {
+                    for (auto& seg : segs) {
+                        if (!seg.words.empty() && !rp.force_aligner)
+                            continue;
+                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + sl.start,
+                                                        sl.end - sl.start, sl.t0_cs, rp.n_threads);
+                        if (!words.empty()) {
+                            seg.t0 = words.front().t0;
+                            seg.t1 = words.back().t1;
+                            seg.words = std::move(words);
+                        }
                     }
                 }
-            }
 
-            for (auto& seg : segs)
-                result.segs.push_back(std::move(seg));
+                for (auto& seg : segs)
+                    result.segs.push_back(std::move(seg));
 
-            if (!rp.no_prints) {
-                auto tc1 = std::chrono::steady_clock::now();
-                double elapsed = std::chrono::duration<double>(tc1 - tc0).count();
-                fprintf(stderr, "crispasr-server: transcribed %.1fs audio in %.1fs (%.1fx realtime)\n",
-                        (double)n_samples / SR, elapsed, (double)n_samples / SR / std::max(elapsed, 0.001));
+                if (!rp.no_prints && slices.size() > 1) {
+                    auto tc1 = std::chrono::steady_clock::now();
+                    double slice_s = std::chrono::duration<double>(tc1 - tc0).count();
+                    fprintf(stderr, "crispasr-server: slice %zu/%zu done (%.1fs audio in %.1fs)\n",
+                            i + 1, slices.size(), (sl.end - sl.start) / (double)SR, slice_s);
+                }
             }
         }
 
