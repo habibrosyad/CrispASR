@@ -435,7 +435,7 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
 
         // Match file-mode `-l auto`: run LID once per uploaded audio sample
         // before dispatching chunks to backends that need explicit language.
-        if (want_auto_lang && !has_native_lid && !lid_disabled) {
+        if (want_auto_lang && !lid_disabled) {
             crispasr_lid_result lid;
             if (crispasr_detect_language_cli(pcmf32.data(), (int)pcmf32.size(), rp, lid)) {
                 rp.language = lid.lang_code;
