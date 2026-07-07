@@ -476,10 +476,74 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     rp.force_aligner ? 1 : 0, want_align ? 1 : 0);
         }
 
+        // Match CLI per-slice context: extend each VAD slice by
+        // chunk_overlap_seconds on both sides so whisper has acoustic
+        // context for short segments, then trim results back.
+        const bool use_chunk_context = rp.vad && slices.size() > 1 && rp.chunk_overlap_seconds > 0.0f;
+        constexpr int64_t kBoundaryToleranceCs = 20; // 200 ms word-boundary tolerance
+
         for (size_t i = 0; i < slices.size(); ++i) {
             const auto& sl = slices[i];
+
+            int ext_start = sl.start;
+            int ext_end = sl.end;
+            int64_t ext_t0_cs = sl.t0_cs;
+            if (use_chunk_context) {
+                const int ctx_samples = (int)(rp.chunk_overlap_seconds * SR);
+                ext_start = std::max(0, sl.start - ctx_samples);
+                ext_end = std::min(n_samples, sl.end + ctx_samples);
+                ext_t0_cs = (int64_t)((double)ext_start / SR * 100.0);
+            }
+
             auto tc0 = std::chrono::steady_clock::now();
-            auto segs = backend->transcribe(pcmf32.data() + sl.start, sl.end - sl.start, sl.t0_cs, rp);
+            auto segs = backend->transcribe(pcmf32.data() + ext_start, ext_end - ext_start, ext_t0_cs, rp);
+
+            // Trim back to the original slice range when context was added.
+            if (use_chunk_context && !segs.empty()) {
+                const bool is_first = (i == 0);
+                const bool is_last = (i == slices.size() - 1);
+                const int64_t left_cs = is_first ? 0 : (sl.t0_cs - kBoundaryToleranceCs);
+                const int64_t right_cs = is_last ? INT64_MAX : (sl.t1_cs + kBoundaryToleranceCs);
+
+                for (auto& seg : segs) {
+                    if (seg.words.empty()) {
+                        const int64_t mid = (seg.t0 + seg.t1) / 2;
+                        if (mid < left_cs || mid >= right_cs)
+                            seg.text.clear();
+                        continue;
+                    }
+                    std::vector<crispasr_word> kept;
+                    for (auto& w : seg.words) {
+                        if (w.t0 >= left_cs && w.t0 < right_cs)
+                            kept.push_back(std::move(w));
+                    }
+                    std::string rebuilt;
+                    for (const auto& w : kept) {
+                        if (w.text.empty())
+                            continue;
+                        if (!rebuilt.empty()) {
+                            const unsigned char prev_last = (unsigned char)rebuilt.back();
+                            const unsigned char cur_first = (unsigned char)w.text[0];
+                            const bool already_spaced = (cur_first == ' ');
+                            const bool cjk_boundary = (prev_last >= 0xE0) || (cur_first >= 0xE0);
+                            if (!already_spaced && !cjk_boundary)
+                                rebuilt += ' ';
+                        }
+                        rebuilt += w.text;
+                    }
+                    if (!rebuilt.empty() && rebuilt[0] == ' ')
+                        rebuilt = rebuilt.substr(1);
+                    seg.text = std::move(rebuilt);
+                    seg.words = std::move(kept);
+                    if (!seg.words.empty()) {
+                        seg.t0 = seg.words.front().t0;
+                        seg.t1 = seg.words.back().t1;
+                    }
+                }
+                segs.erase(
+                    std::remove_if(segs.begin(), segs.end(), [](const crispasr_segment& s) { return s.text.empty(); }),
+                    segs.end());
+            }
 
             // Issue #89 gap-fill second pass (bounded-window backends only) —
             // same policy as the CLI dispatcher (crispasr_gap_fill.h).
