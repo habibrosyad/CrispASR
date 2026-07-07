@@ -424,8 +424,14 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         return result;
     }
 
+    // Save whether VAD was active *before* we clear rp.vad for the
+    // per-slice path.  We need this flag for the stitching condition check.
+    const bool had_vad = rp.vad;
+
     // VAD (if any) already ran above — disable it for the backend so
-    // whisper_full doesn't re-run Silero on every slice (#132).
+    // whisper_full doesn't re-run Silero on every slice (#132).  The
+    // stitching path will re-enable it before transcribing the combined
+    // buffer so whisper's internal VAD can re-segment at slice boundaries.
     rp.vad = false;
     rp.vad_model.clear();
 
@@ -480,12 +486,18 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         // (with 0.1s silence gaps) and transcribe as a single call — matches
         // the CLI's historical whisper VAD path and preserves cross-segment
         // context. Only applies when VAD produces multiple slices.
-        if (rp.vad && slices.size() > 1) {
+        if (had_vad && slices.size() > 1) {
             auto stitched = crispasr_stitch_vad_slices(pcmf32.data(), n_samples, SR, slices);
             if (!rp.no_prints) {
                 fprintf(stderr, "crispasr-server: stitched %zu VAD segments -> %.1fs (from %.1fs original)\n",
                         slices.size(), (double)stitched.total_duration_cs / 100.0, (double)n_samples / SR);
             }
+
+            // Re-enable whisper's internal VAD on the stitched buffer so the
+            // 0.1s gaps between original VAD segments act as natural segment
+            // boundaries — matching the CLI's historical whisper VAD path.
+            rp.vad = true;
+            rp.vad_model = crispasr_resolve_vad_model(rp);
 
             auto tc0 = std::chrono::steady_clock::now();
             auto segs = backend->transcribe(stitched.samples.data(), (int)stitched.samples.size(), 0, rp);

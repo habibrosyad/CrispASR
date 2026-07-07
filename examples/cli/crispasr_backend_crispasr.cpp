@@ -113,26 +113,14 @@ public:
 
         wp.no_timestamps = p.no_timestamps;
 
-        // Whisper-internal VAD. Note this is distinct from the Silero-VAD
-        // slicing the crispasr dispatcher does upstream — that one produces
-        // `crispasr_audio_slice` batches that we transcribe one slice at a
-        // time. This is whisper's in-graph energy-based VAD that skips
-        // silent regions while decoding a single call. The two compose
-        // without interfering: the dispatcher's slicing is a no-op when
-        // params.vad_model is empty, in which case all of whisper-internal
-        // VAD's behaviour is preserved.
-        // Resolve VAD model so `--vad` without `--vad-model` auto-downloads
-        // CrispASR's dispatch layer (crispasr_compute_audio_slices) already
-        // runs Silero / FireRed / MarbleNet / whisper-vad before calling
-        // transcribe(), so the audio arriving here is pre-sliced to speech
-        // segments.  Running whisper's internal VAD again is redundant and
-        // doubles the VAD cost on every request — causing the performance
-        // regression in #132 where VAD time accumulates 60x.
-        //
-        // Always disable whisper-internal VAD; the CrispASR dispatch handles
-        // all VAD variants uniformly.
-        wp.vad = false;
-        wp.vad_model_path = "";
+        // Whisper-internal VAD. In the per-slice path the CrispASR dispatcher
+        // already trimmed silence, so re-running whisper VAD is redundant.
+        // In the stitching path (server, multiple VAD segments → one buffer)
+        // we want whisper's VAD to re-segment at the 0.1s gaps between
+        // original VAD slices — that's why `rp.vad` may be true when called
+        // from the server's stitching code path.  Respect the caller's intent.
+        wp.vad = p.vad;
+        wp.vad_model_path = p.vad_model.c_str();
 
         // Grammar. When the user passed --grammar + --grammar-rule, the CLI
         // has already parsed the GBNF and stashed it in params.grammar_parsed.
