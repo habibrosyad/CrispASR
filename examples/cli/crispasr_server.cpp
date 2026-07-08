@@ -24,6 +24,7 @@
 #include "crispasr_backend.h"
 #include "crispasr_diarize_cli.h"
 #include "crispasr_gap_fill.h"
+#include "crispasr_lcs_dedup.h"
 #include "crispasr_speaker_embedder.h"
 #include "crispasr_lid.h"
 #include "crispasr_lid_cli.h"
@@ -483,12 +484,11 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         }
 
         // Stitching path: combine VAD slices into one buffer with 0.1s silence
-        // gaps and transcribe as a single call — matches the CLI's historical
-        // whisper VAD path and preserves cross-segment context. Only applies
-        // for audio up to 600 s to avoid OOM from the stitched buffer.
-        // Beyond that, or without VAD, fall back to per-slice transcription.
+        // gaps and transcribe as a single call. Opt-in only (vad_stitch),
+        // matching the CLI default. Without it, per-slice transcription
+        // produces cleaner timestamps, diarization, and capitalization.
         const double max_stitch_duration_s = 600.0;
-        const bool use_stitch = had_vad && slices.size() > 1 &&
+        const bool use_stitch = had_vad && slices.size() > 1 && rp.vad_stitch &&
             (double)n_samples / SR <= max_stitch_duration_s;
 
         if (use_stitch) {
@@ -554,6 +554,7 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
             if (!rp.no_prints) {
                 fprintf(stderr, "crispasr-server: transcribing %zu slice(s) individually\n", slices.size());
             }
+            std::vector<std::vector<crispasr_segment>> per_slice;
             for (size_t i = 0; i < slices.size(); ++i) {
                 const auto& sl = slices[i];
                 auto tc0 = std::chrono::steady_clock::now();
@@ -573,8 +574,7 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     }
                 }
 
-                for (auto& seg : segs)
-                    result.segs.push_back(std::move(seg));
+                per_slice.push_back(std::move(segs));
 
                 if (!rp.no_prints && slices.size() > 1) {
                     auto tc1 = std::chrono::steady_clock::now();
@@ -583,6 +583,19 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                             i + 1, slices.size(), (sl.end - sl.start) / (double)SR, slice_s);
                 }
             }
+
+            // LCS dedup across chunk boundaries (mirrors CLI).
+            const bool lcs_default = rp.chunk_overlap_seconds > 0 && per_slice.size() > 1;
+            const bool lcs_active =
+                (rp.lcs_dedup == "on") ? (per_slice.size() > 1) : (rp.lcs_dedup == "off" ? false : lcs_default);
+            if (lcs_active) {
+                const int delay_tokens = (int)(rp.chunk_overlap_seconds * 1000.0f / 80.0f + 0.5f);
+                crispasr_lcs::apply_lcs_chunk_dedup(per_slice, delay_tokens > 0 ? delay_tokens : 1, rp.lcs_min_length);
+            }
+
+            for (auto& slice_segs : per_slice)
+                for (auto& seg : slice_segs)
+                    result.segs.push_back(std::move(seg));
         }
 
         // Diarization post-step (#143): assign speaker labels to segments.
@@ -1012,6 +1025,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.chunk_overlap_seconds = form_float(req, "chunk_overlap", rp.chunk_overlap_seconds);
         rp.lcs_dedup = form_string(req, "lcs_dedup", rp.lcs_dedup);
         rp.lcs_min_length = form_int(req, "lcs_min_length", rp.lcs_min_length);
+        rp.vad_stitch = form_bool(req, "vad_stitch", rp.vad_stitch);
         rp.parakeet_decoder = form_string(req, "parakeet_decoder", rp.parakeet_decoder);
         rp.no_auto_aligner = form_bool(req, "no_auto_aligner", rp.no_auto_aligner);
         rp.show_alternatives = form_bool(req, "show_alternatives", rp.show_alternatives);
@@ -1166,6 +1180,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.chunk_overlap_seconds = form_float(req, "chunk_overlap", rp.chunk_overlap_seconds);
         rp.lcs_dedup = form_string(req, "lcs_dedup", rp.lcs_dedup);
         rp.lcs_min_length = form_int(req, "lcs_min_length", rp.lcs_min_length);
+        rp.vad_stitch = form_bool(req, "vad_stitch", rp.vad_stitch);
         rp.parakeet_decoder = form_string(req, "parakeet_decoder", rp.parakeet_decoder);
         rp.no_auto_aligner = form_bool(req, "no_auto_aligner", rp.no_auto_aligner);
         rp.show_alternatives = form_bool(req, "show_alternatives", rp.show_alternatives);
@@ -1250,9 +1265,11 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         if (response_format == "text") {
             res.set_content(crispasr_segments_to_text(result.segs), "text/plain; charset=utf-8");
         } else if (response_format == "srt") {
-            res.set_content(crispasr_segments_to_srt(result.segs), "application/x-subrip; charset=utf-8");
+            res.set_content(crispasr_segments_to_srt(result.segs, rp.max_len, rp.split_on_punct),
+                            "application/x-subrip; charset=utf-8");
         } else if (response_format == "vtt") {
-            res.set_content(crispasr_segments_to_vtt(result.segs), "text/vtt; charset=utf-8");
+            res.set_content(crispasr_segments_to_vtt(result.segs, rp.max_len, rp.split_on_punct),
+                            "text/vtt; charset=utf-8");
         } else if (response_format == "verbose_json") {
             std::string task = rp.translate ? "translate" : "transcribe";
             res.set_content(crispasr_segments_to_openai_verbose_json(result.segs, result.duration_s, result.language,

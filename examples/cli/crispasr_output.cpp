@@ -911,8 +911,8 @@ std::string crispasr_segments_to_text(const std::vector<crispasr_segment>& segs)
     return out;
 }
 
-std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len) {
-    auto disp = crispasr_make_disp_segments(segs, max_len);
+std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len, bool split_on_punct) {
+    auto disp = crispasr_make_disp_segments(segs, max_len, split_on_punct);
     std::ostringstream out;
     for (size_t i = 0; i < disp.size(); i++) {
         out << (i + 1) << "\n"
@@ -923,8 +923,8 @@ std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, 
     return out.str();
 }
 
-std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len) {
-    auto disp = crispasr_make_disp_segments(segs, max_len);
+std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len, bool split_on_punct) {
+    auto disp = crispasr_make_disp_segments(segs, max_len, split_on_punct);
     std::ostringstream out;
     out << "WEBVTT\n\n";
     for (const auto& s : disp) {

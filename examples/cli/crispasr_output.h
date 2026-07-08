@@ -95,10 +95,12 @@ void crispasr_print_alternatives(const std::vector<crispasr_segment>& segs, int 
 std::string crispasr_segments_to_text(const std::vector<crispasr_segment>& segs);
 
 // Format segments as SRT subtitle string.
-std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len = 0);
+std::string crispasr_segments_to_srt(const std::vector<crispasr_segment>& segs, int max_len = 0,
+                                     bool split_on_punct = false);
 
 // Format segments as WebVTT subtitle string.
-std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len = 0);
+std::string crispasr_segments_to_vtt(const std::vector<crispasr_segment>& segs, int max_len = 0,
+                                     bool split_on_punct = false);
 
 // Minimal JSON escape (RFC 8259). Shared so the server doesn't duplicate it.
 std::string crispasr_json_escape(const std::string& s);
