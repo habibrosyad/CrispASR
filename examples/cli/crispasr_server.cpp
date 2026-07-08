@@ -426,14 +426,13 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         return result;
     }
 
-    // Save whether VAD was active *before* we clear rp.vad for the
-    // per-slice path.  We need this flag for the stitching condition check.
+    // Save VAD state *before* we clear it for the per-slice path.
     const bool had_vad = rp.vad;
+    const std::string saved_vad_model = rp.vad_model;
 
     // VAD (if any) already ran above — disable it for the backend so
     // whisper_full doesn't re-run Silero on every slice (#132).  The
-    // stitching path will re-enable it before transcribing the combined
-    // buffer so whisper's internal VAD can re-segment at slice boundaries.
+    // internal-VAD and stitching paths re-enable it before transcribing.
     rp.vad = false;
     rp.vad_model.clear();
 
@@ -484,15 +483,85 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     rp.force_aligner ? 1 : 0, want_align ? 1 : 0);
         }
 
+        // Whole-audio internal-VAD path: when the backend handles VAD
+        // natively (whisper), skip external Silero pre-slicing and pass
+        // the full buffer — mirrors cli.cpp's whisper_full_parallel() call
+        // which lets whisper's internal VAD segment the audio. External
+        // Silero can be more aggressive and drop quiet speech that whisper
+        // would have kept.
+        const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL);
+
         // Stitching path: combine VAD slices into one buffer with 0.1s silence
         // gaps and transcribe as a single call. Opt-in only (vad_stitch),
         // matching the CLI default. Without it, per-slice transcription
         // produces cleaner timestamps, diarization, and capitalization.
         const double max_stitch_duration_s = 600.0;
-        const bool use_stitch = had_vad && slices.size() > 1 && rp.vad_stitch &&
+        const bool use_stitch = !use_internal_vad && had_vad && slices.size() > 1 && rp.vad_stitch &&
             (double)n_samples / SR <= max_stitch_duration_s;
 
-        if (use_stitch) {
+        if (use_internal_vad) {
+            // Re-enable VAD for the backend's internal handler.
+            rp.vad = true;
+            rp.vad_model = saved_vad_model;
+            if (rp.vad_model.empty())
+                rp.vad_model = crispasr_resolve_vad_model(rp);
+
+            if (!rp.no_prints) {
+                fprintf(stderr, "crispasr-server: using backend internal VAD on full %.1fs buffer\n",
+                        (double)n_samples / SR);
+            }
+
+            auto tc0 = std::chrono::steady_clock::now();
+            auto segs = backend->transcribe(pcmf32.data(), n_samples, 0, rp);
+
+            if (want_align) {
+                for (auto& seg : segs) {
+                    if (!seg.words.empty() && !rp.force_aligner)
+                        continue;
+                    const int s = (int)((double)seg.t0 / 100.0 * SR);
+                    const int e = std::min(n_samples, (int)((double)seg.t1 / 100.0 * SR));
+                    if (e > s) {
+                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + s, e - s,
+                                                        seg.t0, rp.n_threads);
+                        if (!words.empty()) {
+                            seg.t0 = words.front().t0;
+                            seg.t1 = words.back().t1;
+                            seg.words = std::move(words);
+                        }
+                    }
+                }
+            }
+
+            // Diarization on the whole-audio result (single pass).
+            if (rp.diarize && !segs.empty()) {
+                const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty() && !pcmf32s[1].empty();
+                CrispasrPyannoteCache pyannote_cache;
+                if (rp.diarize_method == "pyannote" && !pcmf32.empty())
+                    crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
+                CrispasrSherpaCache sherpa_cache;
+                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                    !pcmf32.empty())
+                    crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
+                const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
+                const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
+                if (have_stereo) {
+                    crispasr_apply_diarize(pcmf32s[0], pcmf32s[1], /*is_stereo=*/true, 0, segs, rp, pya_ptr, shp_ptr);
+                } else {
+                    crispasr_apply_diarize(pcmf32, pcmf32, /*is_stereo=*/false, 0, segs, rp, pya_ptr, shp_ptr);
+                }
+            }
+
+            for (auto& seg : segs)
+                result.segs.push_back(std::move(seg));
+
+            if (!rp.no_prints) {
+                auto tc1 = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(tc1 - tc0).count();
+                fprintf(stderr, "crispasr-server: transcribed %.1fs (internal VAD) in %.1fs (%.1fx realtime)\n",
+                        (double)n_samples / (double)SR, elapsed,
+                        ((double)n_samples / (double)SR) / std::max(elapsed, 0.001));
+            }
+        } else if (use_stitch) {
             auto stitched = crispasr_stitch_vad_slices(pcmf32.data(), n_samples, SR, slices);
             if (!rp.no_prints) {
                 fprintf(stderr, "crispasr-server: stitched %zu VAD segments -> %.1fs (from %.1fs original)\n",
@@ -503,7 +572,9 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
             // 0.1s gaps between original VAD segments act as natural segment
             // boundaries — matching the CLI's historical whisper VAD path.
             rp.vad = true;
-            rp.vad_model = crispasr_resolve_vad_model(rp);
+            rp.vad_model = saved_vad_model;
+            if (rp.vad_model.empty())
+                rp.vad_model = crispasr_resolve_vad_model(rp);
 
             auto tc0 = std::chrono::steady_clock::now();
             auto segs = backend->transcribe(stitched.samples.data(), (int)stitched.samples.size(), 0, rp);
