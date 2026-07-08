@@ -40,7 +40,6 @@
 #include "crispasr_truecase_loader.h"    // shared --truecase-model resolution + apply (CLI parity)
 #include "crispasr_punctuation_policy.h" // crispasr_should_auto_enable_punctuation()
 #include "crispasr_chunk_context_gate.h" // overlap-save context gate (CLI parity)
-#include "crispasr_async_jobs.h"         // async job queue (SQLite-backed)
 
 #include "common-crispasr.h"           // read_audio_data
 #include "crispasr_chat.h"             // /v1/chat/completions
@@ -353,6 +352,8 @@ struct transcription_result {
     double duration_s = 0.0;
     double elapsed_s = 0.0;
 };
+
+#include "crispasr_async_jobs.h" // async job queue (SQLite-backed) — after transcription_result
 
 // Load audio from a multipart file upload, transcribe it, return result.
 // Acquires model_mutex internally.

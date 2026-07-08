@@ -39,8 +39,7 @@
 #include <unordered_map>
 #include <vector>
 
-// Forward declarations from crispasr_server.cpp (shared helpers).
-struct transcription_result;
+// Forward declaration from crispasr_server.cpp (shared helper).
 bool read_audio_data(const std::string& fname, std::vector<float>& pcmf32,
                      std::vector<std::vector<float>>& pcmf32s, bool stereo);
 
