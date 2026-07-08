@@ -836,6 +836,9 @@ char* fireredpunc_process(fireredpunc_context* ctx, const char* text) {
         if (cap_next && c >= 'a' && c <= 'z') {
             fixed += (char)(c - 'a' + 'A');
             cap_next = false;
+        } else if (cap_next && c >= 'A' && c <= 'Z') {
+            fixed += c;
+            cap_next = false;
         } else {
             fixed += c;
             // Check for sentence enders (. ? ! and their full-width versions)

@@ -39,6 +39,7 @@
 #include "crispasr_punc_loader.h"        // shared --punc-model alias resolution (CLI parity)
 #include "crispasr_truecase_loader.h"    // shared --truecase-model resolution + apply (CLI parity)
 #include "crispasr_punctuation_policy.h" // crispasr_should_auto_enable_punctuation()
+#include "crispasr_chunk_context_gate.h" // overlap-save context gate (CLI parity)
 
 #include "common-crispasr.h"           // read_audio_data
 #include "crispasr_chat.h"             // /v1/chat/completions
@@ -535,6 +536,25 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                 }
             }
 
+            // Diarization on the stitched result (whole-audio, single pass).
+            if (rp.diarize && !segs.empty()) {
+                const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty() && !pcmf32s[1].empty();
+                CrispasrPyannoteCache pyannote_cache;
+                if (rp.diarize_method == "pyannote" && !pcmf32.empty())
+                    crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
+                CrispasrSherpaCache sherpa_cache;
+                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                    !pcmf32.empty())
+                    crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
+                const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
+                const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
+                if (have_stereo) {
+                    crispasr_apply_diarize(pcmf32s[0], pcmf32s[1], /*is_stereo=*/true, 0, segs, rp, pya_ptr, shp_ptr);
+                } else {
+                    crispasr_apply_diarize(pcmf32, pcmf32, /*is_stereo=*/false, 0, segs, rp, pya_ptr, shp_ptr);
+                }
+            }
+
             for (auto& seg : segs)
                 result.segs.push_back(std::move(seg));
 
@@ -546,19 +566,97 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                         (stitched.total_duration_cs / 100.0) / std::max(elapsed, 0.001));
             }
         } else {
-            // Per-slice transcription (original path).
-            // This is the fallback for:
-            //   - No VAD (energy-chunked slices)
-            //   - Single VAD segment
-            //   - VAD audio too long for stitching (avoids OOM)
+            // Per-slice transcription with overlap-save context and in-situ
+            // diarization — mirrors crispasr_run.cpp process_slice().
             if (!rp.no_prints) {
                 fprintf(stderr, "crispasr-server: transcribing %zu slice(s) individually\n", slices.size());
             }
+
+            // Overlap-save chunk context gate (mirrors CLI, issue #114).
+            const float kChunkContextS = rp.chunk_overlap_seconds;
+            constexpr int64_t kBoundaryToleranceCs = 20; // 200 ms
+            const bool backend_ok = crispasr_chunk_context::backend_allows_chunk_context(backend->name());
+            const bool use_chunk_context = crispasr_chunk_context::should_use_chunk_context(
+                effective_chunk_seconds, slices.size(), kChunkContextS, had_vad, backend_ok);
+
+            // Pre-compute diarization caches for cross-slice consistency.
+            const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty() && !pcmf32s[1].empty();
+            CrispasrPyannoteCache pyannote_cache;
+            if (rp.diarize && rp.diarize_method == "pyannote" && !pcmf32.empty()) {
+                crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
+            }
+            CrispasrSherpaCache sherpa_cache;
+            if (rp.diarize &&
+                (rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                !pcmf32.empty()) {
+                crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
+            }
+            const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
+            const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
+
             std::vector<std::vector<crispasr_segment>> per_slice;
             for (size_t i = 0; i < slices.size(); ++i) {
                 const auto& sl = slices[i];
                 auto tc0 = std::chrono::steady_clock::now();
-                auto segs = backend->transcribe(pcmf32.data() + sl.start, sl.end - sl.start, sl.t0_cs, rp);
+
+                // Optionally extend the slice with acoustic context.
+                int ext_start = sl.start;
+                int ext_end = sl.end;
+                if (use_chunk_context) {
+                    const int ctx_samples = (int)(kChunkContextS * SR);
+                    ext_start = std::max(0, sl.start - ctx_samples);
+                    ext_end = std::min(n_samples, sl.end + ctx_samples);
+                }
+                const int64_t ext_t0_cs = (int64_t)((double)ext_start / SR * 100.0);
+
+                auto segs = backend->transcribe(pcmf32.data() + ext_start, ext_end - ext_start, ext_t0_cs, rp);
+
+                // Trim back to the original slice range when context was added.
+                if (use_chunk_context && !segs.empty()) {
+                    const bool is_first = (i == 0);
+                    const bool is_last = (i == slices.size() - 1);
+                    const int64_t left_cs = is_first ? 0 : (sl.t0_cs - kBoundaryToleranceCs);
+                    const int64_t right_cs = is_last ? INT64_MAX : (sl.t1_cs + kBoundaryToleranceCs);
+
+                    for (auto& seg : segs) {
+                        if (seg.words.empty()) {
+                            const int64_t mid = (seg.t0 + seg.t1) / 2;
+                            if (mid < left_cs || mid >= right_cs)
+                                seg.text.clear();
+                            continue;
+                        }
+                        std::vector<crispasr_word> kept;
+                        for (auto& w : seg.words) {
+                            if (w.t0 >= left_cs && w.t0 < right_cs)
+                                kept.push_back(std::move(w));
+                        }
+                        std::string rebuilt;
+                        for (const auto& w : kept) {
+                            if (w.text.empty())
+                                continue;
+                            if (!rebuilt.empty()) {
+                                const unsigned char prev_last = (unsigned char)rebuilt.back();
+                                const unsigned char cur_first = (unsigned char)w.text[0];
+                                const bool already_spaced = (cur_first == ' ');
+                                const bool cjk_boundary = (prev_last >= 0xE0) || (cur_first >= 0xE0);
+                                if (!already_spaced && !cjk_boundary)
+                                    rebuilt += ' ';
+                            }
+                            rebuilt += w.text;
+                        }
+                        if (!rebuilt.empty() && rebuilt[0] == ' ')
+                            rebuilt = rebuilt.substr(1);
+                        seg.text = std::move(rebuilt);
+                        seg.words = std::move(kept);
+                        if (!seg.words.empty()) {
+                            seg.t0 = seg.words.front().t0;
+                            seg.t1 = seg.words.back().t1;
+                        }
+                    }
+                    segs.erase(
+                        std::remove_if(segs.begin(), segs.end(), [](const crispasr_segment& s) { return s.text.empty(); }),
+                        segs.end());
+                }
 
                 if (want_align) {
                     for (auto& seg : segs) {
@@ -571,6 +669,27 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                             seg.t1 = words.back().t1;
                             seg.words = std::move(words);
                         }
+                    }
+                }
+
+                // Gap-fill second pass (bounded-window backends, mirrors CLI).
+                if (backend->vad_slice_cap_seconds() > 0) {
+                    const char* gf = getenv("CRISPASR_GAP_FILL");
+                    if (!gf || atoi(gf) != 0)
+                        crispasr_gap_fill_slice(*backend, rp, pcmf32.data(), n_samples, SR, sl, segs);
+                }
+
+                // In-situ diarization: apply immediately per-slice before
+                // merging, so segment-to-slice assignment is exact.
+                if (rp.diarize && !segs.empty()) {
+                    if (have_stereo) {
+                        std::vector<float> sl_l(pcmf32s[0].begin() + sl.start, pcmf32s[0].begin() + sl.end);
+                        std::vector<float> sl_r(pcmf32s[1].begin() + sl.start, pcmf32s[1].begin() + sl.end);
+                        crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, segs, rp, pya_ptr, shp_ptr);
+                    } else {
+                        std::vector<float> mono_slice(pcmf32.begin() + sl.start, pcmf32.begin() + sl.end);
+                        crispasr_apply_diarize(mono_slice, mono_slice,
+                                               /*is_stereo=*/false, sl.t0_cs, segs, rp, pya_ptr, shp_ptr);
                     }
                 }
 
@@ -598,64 +717,11 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     result.segs.push_back(std::move(seg));
         }
 
-        // Diarization post-step (#143): assign speaker labels to segments.
-        // Mirrors the CLI path in crispasr_run.cpp:732-743.
-        if (rp.diarize && !result.segs.empty()) {
-            const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty() && !pcmf32s[1].empty();
-
-            // Pre-compute global caches for cross-slice consistency.
-            CrispasrPyannoteCache pyannote_cache;
-            if (rp.diarize_method == "pyannote" && !pcmf32.empty()) {
-                crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
-            }
-            CrispasrSherpaCache sherpa_cache;
-            if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
-                !pcmf32.empty()) {
-                crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
-            }
-            const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
-            const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
-
-            // Apply diarize per-slice. We re-walk the slices and apply
-            // diarize to the corresponding range of result.segs.
-            size_t seg_offset = 0;
-            for (size_t i = 0; i < slices.size(); ++i) {
-                const auto& sl = slices[i];
-                // Count how many segments belong to this slice (by timestamp range).
-                size_t seg_count = 0;
-                for (size_t j = seg_offset; j < result.segs.size(); ++j) {
-                    // Segments from the next slice will have t0 >= next slice's t0_cs.
-                    if (i + 1 < slices.size() && result.segs[j].t0 >= slices[i + 1].t0_cs)
-                        break;
-                    seg_count++;
-                }
-
-                if (seg_count > 0) {
-                    std::vector<crispasr_segment> slice_segs(result.segs.begin() + (ptrdiff_t)seg_offset,
-                                                             result.segs.begin() + (ptrdiff_t)(seg_offset + seg_count));
-                    if (have_stereo) {
-                        std::vector<float> sl_l(pcmf32s[0].begin() + sl.start, pcmf32s[0].begin() + sl.end);
-                        std::vector<float> sl_r(pcmf32s[1].begin() + sl.start, pcmf32s[1].begin() + sl.end);
-                        crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, slice_segs, rp, pya_ptr,
-                                               shp_ptr);
-                    } else {
-                        std::vector<float> mono_slice(pcmf32.begin() + sl.start, pcmf32.begin() + sl.end);
-                        crispasr_apply_diarize(mono_slice, mono_slice,
-                                               /*is_stereo=*/false, sl.t0_cs, slice_segs, rp, pya_ptr, shp_ptr);
-                    }
-                    // Copy back the diarized segments.
-                    for (size_t j = 0; j < seg_count; ++j)
-                        result.segs[seg_offset + j] = std::move(slice_segs[j]);
-                }
-                seg_offset += seg_count;
-            }
-
-            // Global embedding-based re-clustering (issue #107 P3).
-            if (!rp.diarize_embedder.empty() && !pcmf32.empty()) {
-                auto embedder = crispasr_make_speaker_embedder(rp.diarize_embedder, rp.n_threads, rp.cache_dir);
-                if (embedder) {
-                    crispasr_remap_speakers_via_embeddings(result.segs, pcmf32.data(), n_samples, embedder.get(), rp);
-                }
+        // Global embedding-based re-clustering (issue #107 P3).
+        if (rp.diarize && !rp.diarize_embedder.empty() && !pcmf32.empty()) {
+            auto embedder = crispasr_make_speaker_embedder(rp.diarize_embedder, rp.n_threads, rp.cache_dir);
+            if (embedder) {
+                crispasr_remap_speakers_via_embeddings(result.segs, pcmf32.data(), n_samples, embedder.get(), rp);
             }
         }
 
