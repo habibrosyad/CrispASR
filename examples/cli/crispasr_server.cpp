@@ -488,8 +488,12 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         // the full buffer — mirrors cli.cpp's whisper_full_parallel() call
         // which lets whisper's internal VAD segment the audio. External
         // Silero can be more aggressive and drop quiet speech that whisper
-        // would have kept.
-        const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL);
+        // would have kept. Capped at 10 minutes: beyond that, whisper's
+        // O(T²) encoder risks OOM and quality degrades past the trained
+        // 30s window — fall through to per-slice for longer audio.
+        const double max_internal_vad_duration_s = 600.0;
+        const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL) &&
+            (double)n_samples / SR <= max_internal_vad_duration_s;
 
         // Stitching path: combine VAD slices into one buffer with 0.1s silence
         // gaps and transcribe as a single call. Opt-in only (vad_stitch),
