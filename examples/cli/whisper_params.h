@@ -206,6 +206,11 @@ struct whisper_params {
     // --wyoming-port: Wyoming protocol (Home Assistant Assist) TCP server.
     //   -1 = disabled (default), N = port N.
     int32_t wyoming_port = -1;
+    // --async-workers: background worker threads for async transcription jobs.
+    //   0 = disabled (async=true returns 400), 1+ = worker count.
+    int32_t async_workers = 1;
+    // --async-max-pending: max queued + processing jobs before returning 429.
+    int32_t async_max_pending = 50;
     int32_t stream_step_ms = 3000;
     int32_t stream_length_ms = 10000;
     int32_t stream_keep_ms = 200;

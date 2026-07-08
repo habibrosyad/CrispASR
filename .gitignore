@@ -115,4 +115,5 @@ samples/qwen3_tts/
 SESSION_HANDOVER.md
 /handover-prompts/
 /docs/prompts/
+/docs/superpowers/
 .ccache/

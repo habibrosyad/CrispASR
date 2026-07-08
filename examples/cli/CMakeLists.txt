@@ -355,6 +355,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/crispasr_backend_parler.cpp")
     target_link_libraries(${TARGET} PRIVATE parler-tts)
 endif()
 
+# SQLite3 — required for async job queue (--async-workers)
+find_package(SQLite3 QUIET)
+if (SQLite3_FOUND)
+    target_link_libraries(${TARGET} PRIVATE SQLite::SQLite3)
+    message(STATUS "SQLite3 found: ${SQLite3_VERSION}")
+else()
+    find_library(SQLITE3_LIBRARY NAMES sqlite3)
+    find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
+    if (SQLITE3_LIBRARY AND SQLITE3_INCLUDE_DIR)
+        target_link_libraries(${TARGET} PRIVATE ${SQLITE3_LIBRARY})
+        target_include_directories(${TARGET} PRIVATE ${SQLITE3_INCLUDE_DIR})
+        message(STATUS "SQLite3 found (manual): ${SQLITE3_LIBRARY}")
+    else()
+        message(FATAL_ERROR "SQLite3 not found. Install libsqlite3-dev (apt) or sqlite3 (brew/vcpkg).")
+    endif()
+endif()
+
 # MP3 output — in-tree glint encoder (glint/), always available.
 target_link_libraries(${TARGET} PRIVATE glint)
 

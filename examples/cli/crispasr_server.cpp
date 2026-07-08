@@ -40,6 +40,7 @@
 #include "crispasr_truecase_loader.h"    // shared --truecase-model resolution + apply (CLI parity)
 #include "crispasr_punctuation_policy.h" // crispasr_should_auto_enable_punctuation()
 #include "crispasr_chunk_context_gate.h" // overlap-save context gate (CLI parity)
+#include "crispasr_async_jobs.h"         // async job queue (SQLite-backed)
 
 #include "common-crispasr.h"           // read_audio_data
 #include "crispasr_chat.h"             // /v1/chat/completions
@@ -1059,6 +1060,275 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     crispasr_load_truecase(params.truecase_model, params.no_prints, params.cache_dir, tc_ctx, tc_crf_ctx, tc_lstm_ctx,
                            "crispasr-server");
 
+    // -----------------------------------------------------------------------
+    // Async job queue (--async-workers N)
+    // -----------------------------------------------------------------------
+    CrispasrJobStore job_store;
+    CrispasrJobWorker job_worker;
+    std::thread cleanup_thread;
+    std::atomic<bool> cleanup_shutdown{false};
+    const bool async_enabled = params.async_workers > 0;
+
+    if (async_enabled) {
+        std::string async_dir = scratch_dir() + "/async";
+        std::error_code ec;
+        std::filesystem::create_directories(async_dir, ec);
+
+        std::string db_path = scratch_dir() + "/crispasr_jobs.db";
+        if (!job_store.open(db_path)) {
+            fprintf(stderr, "crispasr-server: failed to open async job database\n");
+            return 1;
+        }
+
+        // Transcription function for workers. Worker 0 with async_workers==1
+        // shares the existing backend; additional workers would create their own.
+        auto transcribe_fn = [&](const std::string& audio_path, const std::string& params_json,
+                                 const std::string& job_id) -> transcription_result {
+            transcription_result result;
+
+            // Decode audio from the saved file.
+            std::vector<float> pcmf32;
+            std::vector<std::vector<float>> pcmf32s;
+            // Parse diarize flag from params_json to know if we need stereo.
+            bool want_diarize = params_json.find("\"diarize\":true") != std::string::npos ||
+                                params_json.find("\"diarize\": true") != std::string::npos;
+            if (!read_audio_data(audio_path, pcmf32, pcmf32s, want_diarize)) {
+                result.error = "failed to decode audio (unsupported format or corrupt file)";
+                return result;
+            }
+            if (pcmf32.empty()) {
+                result.error = "audio file contains no samples";
+                return result;
+            }
+
+            // Build per-request params from the stored JSON + base server params.
+            // For now, use the server's base params (the worker shares the backend).
+            whisper_params rp = params;
+            // Apply key overrides from the stored request.
+            // Parse minimal fields from params_json using simple string search.
+            // A full JSON parser would be better, but we avoid adding deps.
+            auto json_str = [&](const char* key) -> std::string {
+                std::string needle = std::string("\"") + key + "\":\"";
+                auto pos = params_json.find(needle);
+                if (pos == std::string::npos) return "";
+                pos += needle.size();
+                auto end = params_json.find('"', pos);
+                if (end == std::string::npos) return "";
+                return params_json.substr(pos, end - pos);
+            };
+            auto json_bool = [&](const char* key, bool def) -> bool {
+                std::string needle = std::string("\"") + key + "\":";
+                auto pos = params_json.find(needle);
+                if (pos == std::string::npos) return def;
+                pos += needle.size();
+                while (pos < params_json.size() && params_json[pos] == ' ') pos++;
+                return pos < params_json.size() && params_json[pos] == 't';
+            };
+            auto json_float = [&](const char* key, float def) -> float {
+                std::string needle = std::string("\"") + key + "\":";
+                auto pos = params_json.find(needle);
+                if (pos == std::string::npos) return def;
+                pos += needle.size();
+                try { return std::stof(params_json.substr(pos)); } catch (...) { return def; }
+            };
+            auto json_int = [&](const char* key, int def) -> int {
+                std::string needle = std::string("\"") + key + "\":";
+                auto pos = params_json.find(needle);
+                if (pos == std::string::npos) return def;
+                pos += needle.size();
+                try { return std::stoi(params_json.substr(pos)); } catch (...) { return def; }
+            };
+
+            std::string lang = json_str("language");
+            if (!lang.empty()) rp.language = lang;
+            rp.translate = json_bool("translate", rp.translate);
+            rp.diarize = json_bool("diarize", rp.diarize);
+            std::string dm = json_str("diarize_method");
+            if (!dm.empty()) rp.diarize_method = dm;
+            rp.vad = json_bool("vad", rp.vad);
+            rp.temperature = json_float("temperature", rp.temperature);
+            rp.punctuation = json_bool("punctuation", rp.punctuation);
+            rp.split_on_punct = json_bool("split_on_punct", rp.split_on_punct);
+            rp.max_len = json_int("max_len", rp.max_len);
+            std::string hotwords = json_str("hotwords");
+            if (!hotwords.empty()) rp.hotwords = hotwords;
+            std::string prompt = json_str("prompt");
+            if (!prompt.empty()) rp.prompt = prompt;
+
+            const bool need_timestamps = true; // always store full data
+
+            // Acquire the model mutex and run transcription.
+            // Build a fake MultipartFormData to reuse do_transcribe's internals.
+            // Instead, replicate the core transcription inline since we already
+            // have decoded PCM. We hold the model_mutex for the duration.
+            auto t_start = std::chrono::steady_clock::now();
+            result.duration_s = (double)pcmf32.size() / 16000.0;
+            result.language = rp.language;
+
+            {
+                std::lock_guard<std::mutex> lock(model_mutex);
+
+                // Run the same pipeline as do_transcribe but on pre-decoded PCM.
+                // We pass the full audio to backend->transcribe with VAD settings.
+                const int SR = 16000;
+                const int n_samples = (int)pcmf32.size();
+
+                const bool want_auto_lang = rp.detect_language || rp.language == "auto";
+                const bool has_native_lid = (backend->capabilities() & CAP_LANGUAGE_DETECT) != 0;
+                const bool lid_disabled = rp.lid_backend == "off" || rp.lid_backend == "none";
+
+                // Compute slices.
+                int effective_chunk_seconds = rp.chunk_seconds;
+                if (rp.vad && !rp.chunk_seconds_explicit && (backend->capabilities() & CAP_UNBOUNDED_INPUT))
+                    effective_chunk_seconds = 0;
+                const int vad_cap = backend->vad_slice_cap_seconds();
+                if (vad_cap > 0 && !rp.chunk_seconds_explicit &&
+                    (effective_chunk_seconds == 0 || effective_chunk_seconds > vad_cap))
+                    effective_chunk_seconds = vad_cap;
+
+                const auto slices = crispasr_compute_audio_slices(pcmf32.data(), n_samples, SR, effective_chunk_seconds, rp);
+                if (slices.empty()) {
+                    result.ok = true;
+                    return result;
+                }
+
+                const bool had_vad = rp.vad;
+                const std::string saved_vad_model = rp.vad_model;
+                rp.vad = false;
+                rp.vad_model.clear();
+
+                // LID
+                if (want_auto_lang && !lid_disabled) {
+                    crispasr_lid_result lid;
+                    if (crispasr_detect_language_cli(pcmf32.data(), n_samples, rp, lid)) {
+                        rp.language = lid.lang_code;
+                        if (rp.source_lang.empty() || rp.source_lang == "auto")
+                            rp.source_lang = lid.lang_code;
+                    } else if (rp.language == "auto") {
+                        rp.language = "en";
+                    }
+                }
+                result.language = rp.language;
+
+                const bool want_align = need_timestamps && !rp.aligner_model.empty() &&
+                    ((backend->capabilities() & CAP_TIMESTAMPS_CTC) || rp.force_aligner);
+
+                // Use internal VAD path for whisper on short-to-medium audio.
+                const double max_internal_vad_s = 600.0;
+                const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL) &&
+                    (double)n_samples / SR <= max_internal_vad_s;
+
+                if (use_internal_vad) {
+                    rp.vad = true;
+                    rp.vad_model = saved_vad_model;
+                    if (rp.vad_model.empty()) rp.vad_model = crispasr_resolve_vad_model(rp);
+                    result.segs = backend->transcribe(pcmf32.data(), n_samples, 0, rp);
+                } else {
+                    // Per-slice transcription (same as sync path).
+                    const float kChunkContextS = rp.chunk_overlap_seconds;
+                    constexpr int64_t kBoundaryToleranceCs = 20;
+                    const bool backend_ok = crispasr_chunk_context::backend_allows_chunk_context(backend->name());
+                    const bool use_chunk_ctx = crispasr_chunk_context::should_use_chunk_context(
+                        effective_chunk_seconds, slices.size(), kChunkContextS, had_vad, backend_ok);
+
+                    std::vector<std::vector<crispasr_segment>> per_slice;
+                    for (size_t i = 0; i < slices.size(); ++i) {
+                        const auto& sl = slices[i];
+                        int ext_start = sl.start, ext_end = sl.end;
+                        if (use_chunk_ctx) {
+                            const int ctx_s = (int)(kChunkContextS * SR);
+                            ext_start = std::max(0, sl.start - ctx_s);
+                            ext_end = std::min(n_samples, sl.end + ctx_s);
+                        }
+                        const int64_t ext_t0_cs = (int64_t)((double)ext_start / SR * 100.0);
+                        auto segs = backend->transcribe(pcmf32.data() + ext_start, ext_end - ext_start, ext_t0_cs, rp);
+
+                        if (use_chunk_ctx && !segs.empty()) {
+                            const int64_t left_cs = (i == 0) ? 0 : (sl.t0_cs - kBoundaryToleranceCs);
+                            const int64_t right_cs = (i == slices.size() - 1) ? INT64_MAX : (sl.t1_cs + kBoundaryToleranceCs);
+                            for (auto& seg : segs) {
+                                if (seg.words.empty()) {
+                                    const int64_t mid = (seg.t0 + seg.t1) / 2;
+                                    if (mid < left_cs || mid >= right_cs) seg.text.clear();
+                                    continue;
+                                }
+                                std::vector<crispasr_word> kept;
+                                for (auto& w : seg.words)
+                                    if (w.t0 >= left_cs && w.t0 < right_cs) kept.push_back(std::move(w));
+                                std::string rebuilt;
+                                for (const auto& w : kept) {
+                                    if (w.text.empty()) continue;
+                                    if (!rebuilt.empty()) {
+                                        const unsigned char pl = (unsigned char)rebuilt.back();
+                                        const unsigned char cf = (unsigned char)w.text[0];
+                                        if (cf != ' ' && !(pl >= 0xE0 || cf >= 0xE0)) rebuilt += ' ';
+                                    }
+                                    rebuilt += w.text;
+                                }
+                                if (!rebuilt.empty() && rebuilt[0] == ' ') rebuilt = rebuilt.substr(1);
+                                seg.text = std::move(rebuilt);
+                                seg.words = std::move(kept);
+                                if (!seg.words.empty()) { seg.t0 = seg.words.front().t0; seg.t1 = seg.words.back().t1; }
+                            }
+                            segs.erase(std::remove_if(segs.begin(), segs.end(),
+                                [](const crispasr_segment& s) { return s.text.empty(); }), segs.end());
+                        }
+                        per_slice.push_back(std::move(segs));
+
+                        // Update progress.
+                        job_store.update_progress(job_id, (double)(i + 1) / (double)slices.size());
+                    }
+
+                    for (auto& ss : per_slice)
+                        for (auto& seg : ss)
+                            result.segs.push_back(std::move(seg));
+                }
+
+                // Diarization on full result.
+                if (rp.diarize && !result.segs.empty()) {
+                    const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty();
+                    CrispasrPyannoteCache pyannote_cache;
+                    if (rp.diarize_method == "pyannote" && !pcmf32.empty())
+                        crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
+                    CrispasrSherpaCache sherpa_cache;
+                    if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                        !pcmf32.empty())
+                        crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
+                    const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
+                    const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
+                    if (have_stereo) {
+                        crispasr_apply_diarize(pcmf32s[0], pcmf32s[1], true, 0, result.segs, rp, pya_ptr, shp_ptr);
+                    } else {
+                        crispasr_apply_diarize(pcmf32, pcmf32, false, 0, result.segs, rp, pya_ptr, shp_ptr);
+                    }
+                }
+
+                // Punctuation restoration.
+                if (!rp.punctuation) {
+                    for (auto& seg : result.segs) crispasr_strip_punctuation(seg);
+                } else if (punc_ctx.get() || pcs_ctx.get()) {
+                    for (auto& seg : result.segs) {
+                        char* out = pcs_ctx.get()
+                            ? pcs_process(pcs_ctx.get(), seg.text.c_str())
+                            : fireredpunc_process(punc_ctx.get(), seg.text.c_str());
+                        if (out) { seg.text = out; free(out); }
+                    }
+                }
+            }
+
+            auto t_end = std::chrono::steady_clock::now();
+            result.elapsed_s = std::chrono::duration<double>(t_end - t_start).count();
+            result.ok = true;
+            return result;
+        };
+
+        job_worker.start(params.async_workers, job_store, transcribe_fn);
+        crispasr_async_cleanup_start(job_store, cleanup_thread, cleanup_shutdown);
+
+        fprintf(stderr, "crispasr-server: async job queue enabled (%d workers, max %d pending)\n",
+                params.async_workers, params.async_max_pending);
+    }
+
     Server svr;
 
     // CORS support — opt-in via --cors-origin. Browser clients calling our
@@ -1331,6 +1601,76 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
         bool stream = form_bool(req, "stream", false);
 
+        // ---- Async branch: save job and return 202 immediately ----
+        bool async_req = form_bool(req, "async", false);
+        if (async_req) {
+            if (!async_enabled) {
+                json_error(res, 400, "async transcription not enabled (start server with --async-workers N)");
+                return;
+            }
+            if (job_store.count_pending() >= params.async_max_pending) {
+                json_error(res, 429, "too many pending async jobs");
+                return;
+            }
+
+            std::string job_id = crispasr_generate_job_id();
+
+            // Preserve original extension for ffmpeg container detection.
+            std::string ext;
+            {
+                auto dot = audio_file.filename.rfind('.');
+                if (dot != std::string::npos) ext = audio_file.filename.substr(dot);
+            }
+            std::string audio_path = scratch_dir() + "/async/" + job_id + ext;
+            {
+                std::ofstream f(audio_path, std::ios::binary);
+                if (!f) {
+                    json_error(res, 500, "failed to save audio for async processing");
+                    return;
+                }
+                f.write(audio_file.content.data(), (std::streamsize)audio_file.content.size());
+            }
+
+            // Serialize request params that the worker needs.
+            std::ostringstream pj;
+            pj << "{";
+            pj << "\"language\":\"" << crispasr_json_escape(rp.language) << "\"";
+            pj << ",\"translate\":" << (rp.translate ? "true" : "false");
+            pj << ",\"diarize\":" << (rp.diarize ? "true" : "false");
+            if (!rp.diarize_method.empty())
+                pj << ",\"diarize_method\":\"" << crispasr_json_escape(rp.diarize_method) << "\"";
+            pj << ",\"vad\":" << (rp.vad ? "true" : "false");
+            pj << ",\"temperature\":" << rp.temperature;
+            pj << ",\"punctuation\":" << (rp.punctuation ? "true" : "false");
+            pj << ",\"split_on_punct\":" << (rp.split_on_punct ? "true" : "false");
+            pj << ",\"max_len\":" << rp.max_len;
+            if (!rp.hotwords.empty())
+                pj << ",\"hotwords\":\"" << crispasr_json_escape(rp.hotwords) << "\"";
+            if (!rp.prompt.empty())
+                pj << ",\"prompt\":\"" << crispasr_json_escape(rp.prompt) << "\"";
+            pj << "}";
+
+            if (!job_store.create_job(job_id, audio_path, pj.str(), response_format)) {
+                std::remove(audio_path.c_str());
+                json_error(res, 500, "failed to create async job");
+                return;
+            }
+            job_worker.notify();
+
+            int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            res.status = 202;
+            std::ostringstream js;
+            js << "{\"id\":\"" << crispasr_json_escape(job_id) << "\""
+               << ",\"status\":\"queued\""
+               << ",\"created_at\":" << now
+               << ",\"progress\":0.0}";
+            res.set_content(js.str(), "application/json");
+
+            fprintf(stderr, "crispasr-server: async job %s queued\n", job_id.c_str());
+            return;
+        }
+
         if (stream && (backend->capabilities() & CAP_STREAMING)) {
             std::string tmp_path =
                 write_temp_audio(audio_file.content.data(), audio_file.content.size(), audio_file.filename);
@@ -1424,6 +1764,72 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         } else {
             // Default: json — {"text": "..."}
             res.set_content(crispasr_segments_to_openai_json(result.segs), "application/json");
+        }
+    });
+
+    // -----------------------------------------------------------------------
+    // GET /v1/audio/transcriptions/:id — poll async job status
+    // -----------------------------------------------------------------------
+    svr.Get(R"(/v1/audio/transcriptions/([a-zA-Z0-9_]+))", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
+        if (!async_enabled) {
+            json_error(res, 400, "async transcription not enabled");
+            return;
+        }
+        const std::string job_id = req.matches[1].str();
+        CrispasrJob job = job_store.get_job(job_id);
+        if (job.id.empty()) {
+            json_error(res, 404, "job not found");
+            return;
+        }
+
+        std::ostringstream js;
+        js << "{\"id\":\"" << crispasr_json_escape(job.id) << "\""
+           << ",\"status\":\"" << crispasr_json_escape(job.status) << "\""
+           << ",\"created_at\":" << job.created_at
+           << ",\"progress\":" << job.progress;
+        if (job.started_at > 0)
+            js << ",\"started_at\":" << job.started_at;
+        if (job.completed_at > 0)
+            js << ",\"completed_at\":" << job.completed_at;
+        if (job.status == "completed" && !job.result.empty())
+            js << ",\"result\":" << job.result;
+        if (job.status == "failed" && !job.error.empty())
+            js << ",\"error\":\"" << crispasr_json_escape(job.error) << "\"";
+        js << "}";
+
+        res.set_content(js.str(), "application/json");
+    });
+
+    // -----------------------------------------------------------------------
+    // DELETE /v1/audio/transcriptions/:id — cancel/delete async job
+    // -----------------------------------------------------------------------
+    svr.Delete(R"(/v1/audio/transcriptions/([a-zA-Z0-9_]+))", [&](const Request& req, Response& res) {
+        if (!require_auth(req, res))
+            return;
+        if (!async_enabled) {
+            json_error(res, 400, "async transcription not enabled");
+            return;
+        }
+        const std::string job_id = req.matches[1].str();
+        CrispasrJob job = job_store.get_job(job_id);
+        if (job.id.empty()) {
+            json_error(res, 404, "job not found");
+            return;
+        }
+
+        if (job.status == "processing")
+            job_worker.request_cancel(job_id);
+
+        std::string audio_path;
+        if (job_store.delete_job(job_id, audio_path)) {
+            if (!audio_path.empty()) std::remove(audio_path.c_str());
+            res.set_content("{\"id\":\"" + crispasr_json_escape(job_id) + "\",\"deleted\":true}",
+                            "application/json");
+            fprintf(stderr, "crispasr-server: async job %s deleted\n", job_id.c_str());
+        } else {
+            json_error(res, 500, "failed to delete job");
         }
     });
 
@@ -2710,6 +3116,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     if (!params.chat_model.empty()) {
         fprintf(stderr, "  POST /v1/chat/completions        — text-LLM chat (model '%s')\n", params.chat_model.c_str());
     }
+    if (async_enabled) {
+        fprintf(stderr, "  GET  /v1/audio/transcriptions/:id — poll async job status\n");
+        fprintf(stderr, "  DELETE /v1/audio/transcriptions/:id — cancel/delete async job\n");
+    }
     if (!api_keys.empty())
         fprintf(stderr, "crispasr-server: API key authentication enabled\n");
 
@@ -2752,6 +3162,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
     svr.listen(host, port);
 
+    if (async_enabled) {
+        job_worker.stop();
+        crispasr_async_cleanup_stop(cleanup_thread, cleanup_shutdown);
+    }
     if (wyoming_started)
         wyoming_stop();
     if (ws_started)
