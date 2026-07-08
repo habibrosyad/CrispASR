@@ -2591,7 +2591,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     }
     if (params.server_ws_port >= 0) {
         const int ws_port = params.server_ws_port == 0 ? port + 1 : params.server_ws_port;
-        if (ws_stream_start(params.model.c_str(), ws_port, params.n_threads) == 0) {
+        if (ws_stream_start(params.model.c_str(), ws_port, params.n_threads, params.language.c_str()) == 0) {
             ws_started = true;
             fprintf(stderr, "  WS   ws://%s:%d                 — real-time streaming ASR (binary PCM in, JSON out)\n",
                     host.c_str(), ws_port);

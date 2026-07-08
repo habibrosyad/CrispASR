@@ -209,6 +209,7 @@ static std::atomic<bool> g_ws_running{false};
 static std::thread g_ws_thread;
 static socket_t g_ws_listen_fd = INVALID_SOCKET;
 static std::string g_model_path;
+static std::string g_language;
 static int g_n_threads = 4;
 
 // Per-connection handler
@@ -267,7 +268,8 @@ static void ws_handle_connection(socket_t client_fd) {
         return;
     }
 
-    auto* stream = crispasr_session_stream_open(session, g_n_threads, 3000, 10000, 200, "en", 0);
+    const char* lang = g_language.empty() ? nullptr : g_language.c_str();
+    auto* stream = crispasr_session_stream_open(session, g_n_threads, 3000, 10000, 200, lang, 0);
     if (!stream) {
         ws_send_text(client_fd, "{\"error\":\"failed to open stream (whisper-only today)\"}");
         ws_send_close(client_fd);
@@ -355,7 +357,7 @@ static void ws_listener_thread() {
 // Public API
 // ---------------------------------------------------------------------------
 
-extern "C" int ws_stream_start(const char* model_path, int port, int n_threads) {
+extern "C" int ws_stream_start(const char* model_path, int port, int n_threads, const char* language) {
     if (g_ws_running.load()) return 0;
 
 #ifdef _WIN32
@@ -364,6 +366,7 @@ extern "C" int ws_stream_start(const char* model_path, int port, int n_threads) 
 #endif
 
     g_model_path = model_path;
+    g_language = (language && language[0]) ? language : "";
     g_n_threads = n_threads;
 
     g_ws_listen_fd = socket(AF_INET, SOCK_STREAM, 0);

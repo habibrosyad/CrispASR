@@ -32,8 +32,9 @@ int crispasr_stream_flush(struct CrispasrStream* s);
 void crispasr_stream_close(struct CrispasrStream* s);
 
 // Start the WebSocket listener thread on `port`. `model_path` is used
-// to create per-connection crispasr sessions. Returns 0 on success.
-int ws_stream_start(const char* model_path, int port, int n_threads);
+// to create per-connection crispasr sessions. `language` sets the
+// decoding language (NULL or "" for auto-detect). Returns 0 on success.
+int ws_stream_start(const char* model_path, int port, int n_threads, const char* language);
 
 // Stop the listener and join the thread. Safe to call multiple times.
 void ws_stream_stop(void);
