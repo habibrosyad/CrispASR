@@ -165,6 +165,17 @@ public:
         for (int i = 0; i < n_segments; ++i) {
             crispasr_segment s;
             s.text = whisper_full_get_segment_text(ctx_, i);
+            // Whisper BPE tokens carry a leading space; trim it and collapse
+            // any double spaces so JSON output is clean.
+            {
+                auto& t = s.text;
+                size_t p = t.find_first_not_of(' ');
+                if (p != std::string::npos && p > 0)
+                    t.erase(0, p);
+                size_t pos = 0;
+                while ((pos = t.find("  ", pos)) != std::string::npos)
+                    t.erase(pos, 1);
+            }
             s.t0 = whisper_full_get_segment_t0(ctx_, i) + t_offset_cs;
             s.t1 = whisper_full_get_segment_t1(ctx_, i) + t_offset_cs;
             s.speaker_turn_next = whisper_full_get_segment_speaker_turn_next(ctx_, i);
@@ -208,6 +219,12 @@ public:
             }
             if (have_cur)
                 s.words.push_back(std::move(cur));
+
+            for (auto& w : s.words) {
+                size_t p = w.text.find_first_not_of(' ');
+                if (p != std::string::npos && p > 0)
+                    w.text.erase(0, p);
+            }
 
             out.push_back(std::move(s));
         }
