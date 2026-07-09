@@ -464,6 +464,10 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         params.sherpa_embedding_model = ARGV_NEXT;
     } else if (arg == "--sherpa-num-clusters") {
         params.sherpa_num_clusters = std::stoi(ARGV_NEXT);
+    } else if (arg == "--num-speakers") {
+        params.num_speakers = std::stoi(ARGV_NEXT);
+        if (params.num_speakers > 0 && params.diarize_max_speakers < params.num_speakers)
+            params.diarize_max_speakers = params.num_speakers;
     } else if (arg == "--speaker-db") {
         params.speaker_db = ARGV_NEXT;
     } else if (arg == "--enroll-speaker") {
@@ -1032,6 +1036,10 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.diarize_cluster_threshold);
     fprintf(stderr, "  --diarize-max-speakers N          [%-7d] hard cap on cluster count for --diarize-embedder\n",
             params.diarize_max_speakers);
+    fprintf(stderr,
+            "  --num-speakers N                  [%-7d] expected number of speakers (0 = auto). Applies to all "
+            "diarization methods\n",
+            params.num_speakers);
     fprintf(stderr,
             "  --sherpa-bin PATH                 [%-7s] sherpa-onnx-offline-speaker-diarization binary (default: in "
             "PATH)\n",

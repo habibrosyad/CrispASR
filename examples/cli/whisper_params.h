@@ -170,6 +170,7 @@ struct whisper_params {
     std::string sherpa_segment_model;
     std::string sherpa_embedding_model;
     int sherpa_num_clusters = 0;
+    int num_speakers = 0;
 
     // Speaker identification via TitaNet embeddings + profile DB.
     std::string speaker_db;         // path to speaker profile directory

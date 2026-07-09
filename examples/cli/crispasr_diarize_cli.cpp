@@ -220,10 +220,11 @@ bool apply_sherpa(const std::vector<float>& mono, int64_t slice_t0_cs, std::vect
         return false;
     }
 
+    const int num_clusters = params.num_speakers > 0 ? params.num_speakers : params.sherpa_num_clusters;
     std::ostringstream cmd;
     // clang-format off
     cmd << bin
-        << " --clustering.num-clusters=" << params.sherpa_num_clusters
+        << " --clustering.num-clusters=" << num_clusters
         << " --segmentation.pyannote-model='" << params.sherpa_segment_model << "'"
         << " --embedding.model='" << params.sherpa_embedding_model << "'"
         << " '" << wav_path << "'";
@@ -542,8 +543,9 @@ bool crispasr_compute_sherpa_cache(const float* full_audio, int n_samples, const
         return false;
     }
 
+    const int num_clusters = params.num_speakers > 0 ? params.num_speakers : params.sherpa_num_clusters;
     std::ostringstream cmd;
-    cmd << bin << " --clustering.num-clusters=" << params.sherpa_num_clusters << " --segmentation.pyannote-model='"
+    cmd << bin << " --clustering.num-clusters=" << num_clusters << " --segmentation.pyannote-model='"
         << params.sherpa_segment_model << "'" << " --embedding.model='" << params.sherpa_embedding_model << "'" << " '"
         << wav_path << "'";
     if (!params.no_prints)
@@ -733,7 +735,9 @@ void crispasr_remap_speakers_via_embeddings(std::vector<crispasr_segment>& segs,
     }
 
     const float thr = params.diarize_cluster_threshold;
-    const int max_spk = params.diarize_max_speakers > 0 ? params.diarize_max_speakers : 8;
+    const int max_spk = params.num_speakers > 0           ? params.num_speakers
+                        : params.diarize_max_speakers > 0 ? params.diarize_max_speakers
+                                                          : 8;
     std::vector<int> labels = crispasr_agglomerative_cluster(embeddings, (int)embed_idx.size(), d, thr, max_spk);
 
     // Rewrite segment speakers from clustering output. Segments that

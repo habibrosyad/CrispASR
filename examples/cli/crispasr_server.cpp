@@ -1194,6 +1194,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                 rp.diarize_embedder = de;
             rp.diarize_cluster_threshold = json_float("diarize_cluster_threshold", rp.diarize_cluster_threshold);
             rp.diarize_max_speakers = json_int("diarize_max_speakers", rp.diarize_max_speakers);
+            rp.num_speakers = json_int("num_speakers", rp.num_speakers);
+            if (rp.num_speakers > 0 && rp.diarize_max_speakers < rp.num_speakers)
+                rp.diarize_max_speakers = rp.num_speakers;
             rp.vad = json_bool("vad", rp.vad);
             rp.temperature = json_float("temperature", rp.temperature);
             rp.punctuation = json_bool("punctuation", rp.punctuation);
@@ -1458,6 +1461,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.diarize_embedder = form_string(req, "diarize_embedder", rp.diarize_embedder);
         rp.diarize_cluster_threshold = form_float(req, "diarize_cluster_threshold", rp.diarize_cluster_threshold);
         rp.diarize_max_speakers = form_int(req, "diarize_max_speakers", rp.diarize_max_speakers);
+        rp.num_speakers = form_int(req, "num_speakers", rp.num_speakers);
+        if (rp.num_speakers > 0 && rp.diarize_max_speakers < rp.num_speakers)
+            rp.diarize_max_speakers = rp.num_speakers;
         rp.vad = form_bool(req, "vad", rp.vad);
         rp.vad_threshold = form_float(req, "vad_threshold", rp.vad_threshold);
         rp.vad_min_speech_duration_ms = form_int(req, "vad_min_speech_duration_ms", rp.vad_min_speech_duration_ms);
@@ -1618,6 +1624,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.diarize_embedder = form_string(req, "diarize_embedder", rp.diarize_embedder);
         rp.diarize_cluster_threshold = form_float(req, "diarize_cluster_threshold", rp.diarize_cluster_threshold);
         rp.diarize_max_speakers = form_int(req, "diarize_max_speakers", rp.diarize_max_speakers);
+        rp.num_speakers = form_int(req, "num_speakers", rp.num_speakers);
+        if (rp.num_speakers > 0 && rp.diarize_max_speakers < rp.num_speakers)
+            rp.diarize_max_speakers = rp.num_speakers;
         rp.vad = form_bool(req, "vad", rp.vad);
         rp.vad_threshold = form_float(req, "vad_threshold", rp.vad_threshold);
         rp.vad_min_speech_duration_ms = form_int(req, "vad_min_speech_duration_ms", rp.vad_min_speech_duration_ms);
@@ -1709,6 +1718,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                 pj << ",\"diarize_embedder\":\"" << crispasr_json_escape(rp.diarize_embedder) << "\"";
             pj << ",\"diarize_cluster_threshold\":" << rp.diarize_cluster_threshold;
             pj << ",\"diarize_max_speakers\":" << rp.diarize_max_speakers;
+            pj << ",\"num_speakers\":" << rp.num_speakers;
             pj << ",\"vad\":" << (rp.vad ? "true" : "false");
             pj << ",\"temperature\":" << rp.temperature;
             pj << ",\"punctuation\":" << (rp.punctuation ? "true" : "false");
