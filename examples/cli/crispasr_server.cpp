@@ -1794,8 +1794,15 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             js << ",\"started_at\":" << job.started_at;
         if (job.completed_at > 0)
             js << ",\"completed_at\":" << job.completed_at;
-        if (job.status == "completed" && !job.result.empty())
-            js << ",\"result\":" << job.result;
+        if (job.status == "completed" && !job.result.empty()) {
+            const bool json_fmt = (job.response_format == "json" || job.response_format == "verbose_json" ||
+                                   job.response_format == "diarized_json");
+            if (json_fmt)
+                js << ",\"result\":" << job.result;
+            else
+                js << ",\"result\":\"" << crispasr_json_escape(job.result) << "\"";
+            js << ",\"response_format\":\"" << crispasr_json_escape(job.response_format) << "\"";
+        }
         if (job.status == "failed" && !job.error.empty())
             js << ",\"error\":\"" << crispasr_json_escape(job.error) << "\"";
         js << "}";

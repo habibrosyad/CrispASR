@@ -466,8 +466,8 @@ private:
                 if (!result.ok) {
                     store_->fail_job(job.id, result.error);
                 } else {
-                    std::string result_json = format_result_json(result);
-                    store_->complete_job(job.id, result_json);
+                    std::string formatted = format_result(result, job.response_format, job.request_params);
+                    store_->complete_job(job.id, formatted);
                 }
             } catch (const std::exception& e) {
                 store_->fail_job(job.id, std::string("exception: ") + e.what());
@@ -489,13 +489,44 @@ private:
         }
     }
 
-    static std::string format_result_json(const transcription_result& r) {
-        // Store segments + metadata as JSON for later formatting.
-        // Use the same JSON builder as the server's verbose_json output.
-        std::string task = "transcribe";
-        std::string json = crispasr_segments_to_openai_verbose_json(
-            r.segs, r.duration_s, r.language, task, 0.0f);
-        return json;
+    static std::string format_result(const transcription_result& r,
+                                      const std::string& response_format,
+                                      const std::string& params_json) {
+        auto json_bool = [&](const char* key, bool def) -> bool {
+            std::string needle = std::string("\"") + key + "\":";
+            auto pos = params_json.find(needle);
+            if (pos == std::string::npos) return def;
+            pos += needle.size();
+            while (pos < params_json.size() && params_json[pos] == ' ') pos++;
+            return pos < params_json.size() && params_json[pos] == 't';
+        };
+        auto json_int = [&](const char* key, int def) -> int {
+            std::string needle = std::string("\"") + key + "\":";
+            auto pos = params_json.find(needle);
+            if (pos == std::string::npos) return def;
+            pos += needle.size();
+            try { return std::stoi(params_json.substr(pos)); } catch (...) { return def; }
+        };
+
+        const std::string task = json_bool("translate", false) ? "translate" : "transcribe";
+        const int max_len = json_int("max_len", 0);
+        const bool split_on_punct = json_bool("split_on_punct", false);
+
+        if (response_format == "text") {
+            return crispasr_segments_to_text(r.segs);
+        } else if (response_format == "srt") {
+            return crispasr_segments_to_srt(r.segs, max_len, split_on_punct);
+        } else if (response_format == "vtt") {
+            return crispasr_segments_to_vtt(r.segs, max_len, split_on_punct);
+        } else if (response_format == "verbose_json") {
+            return crispasr_segments_to_openai_verbose_json(
+                r.segs, r.duration_s, r.language, task, 0.0f);
+        } else if (response_format == "diarized_json") {
+            return crispasr_segments_to_diarized_json(
+                r.segs, r.duration_s, r.language, task, 0.0f);
+        } else {
+            return crispasr_segments_to_openai_json(r.segs);
+        }
     }
 };
 
