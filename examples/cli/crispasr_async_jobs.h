@@ -374,7 +374,8 @@ private:
 
 class CrispasrJobWorker {
 public:
-    using TranscribeFn = std::function<transcription_result(const std::string& audio_path,
+    using TranscribeFn = std::function<transcription_result(int worker_id,
+                                                            const std::string& audio_path,
                                                             const std::string& params_json,
                                                             const std::string& job_id)>;
 
@@ -455,7 +456,7 @@ private:
             }
 
             try {
-                auto result = transcribe_fn_(job.audio_path, job.request_params, job.id);
+                auto result = transcribe_fn_(worker_id, job.audio_path, job.request_params, job.id);
                 if (is_cancelled(job.id)) {
                     store_->fail_job(job.id, "cancelled");
                     remove_audio(job.audio_path);

@@ -1070,6 +1070,17 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     std::atomic<bool> cleanup_shutdown{false};
     const bool async_enabled = params.async_workers > 0;
 
+    // Per-worker backend instances. Worker 0 reuses the server's shared
+    // backend + model_mutex; workers 1+ each load their own model copy
+    // so they can run inference concurrently without contention.
+    struct WorkerBackend {
+        CrispasrBackend* be;
+        std::mutex*      mtx;
+    };
+    std::vector<WorkerBackend> worker_backends;
+    std::vector<std::unique_ptr<CrispasrBackend>> owned_backends;
+    std::vector<std::unique_ptr<std::mutex>>       owned_mutexes;
+
     if (async_enabled) {
         std::string async_dir = scratch_dir() + "/async";
         std::error_code ec;
@@ -1081,9 +1092,23 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             return 1;
         }
 
-        // Transcription function for workers. Worker 0 with async_workers==1
-        // shares the existing backend; additional workers would create their own.
-        auto transcribe_fn = [&](const std::string& audio_path, const std::string& params_json,
+        // Worker 0 reuses the server's shared backend; workers 1+ each
+        // load their own model copy for true parallel GPU inference.
+        worker_backends.push_back({backend.get(), &model_mutex});
+        for (int i = 1; i < params.async_workers; ++i) {
+            auto be = crispasr_create_backend(backend_name);
+            if (be && be->init(params)) {
+                owned_mutexes.push_back(std::make_unique<std::mutex>());
+                owned_backends.push_back(std::move(be));
+                worker_backends.push_back({owned_backends.back().get(), owned_mutexes.back().get()});
+                fprintf(stderr, "crispasr-async: worker %d loaded its own model copy\n", i);
+            } else {
+                fprintf(stderr, "crispasr-async: worker %d failed to load model, sharing server backend\n", i);
+                worker_backends.push_back({backend.get(), &model_mutex});
+            }
+        }
+
+        auto transcribe_fn = [&](int worker_id, const std::string& audio_path, const std::string& params_json,
                                  const std::string& job_id) -> transcription_result {
             transcription_result result;
 
@@ -1162,31 +1187,27 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
             const bool need_timestamps = true; // always store full data
 
-            // Acquire the model mutex and run transcription.
-            // Build a fake MultipartFormData to reuse do_transcribe's internals.
-            // Instead, replicate the core transcription inline since we already
-            // have decoded PCM. We hold the model_mutex for the duration.
             auto t_start = std::chrono::steady_clock::now();
             result.duration_s = (double)pcmf32.size() / 16000.0;
             result.language = rp.language;
 
             {
-                std::lock_guard<std::mutex> lock(model_mutex);
+                auto& wb = worker_backends[worker_id];
+                std::lock_guard<std::mutex> lock(*wb.mtx);
+                CrispasrBackend* be = wb.be;
 
-                // Run the same pipeline as do_transcribe but on pre-decoded PCM.
-                // We pass the full audio to backend->transcribe with VAD settings.
                 const int SR = 16000;
                 const int n_samples = (int)pcmf32.size();
 
                 const bool want_auto_lang = rp.detect_language || rp.language == "auto";
-                const bool has_native_lid = (backend->capabilities() & CAP_LANGUAGE_DETECT) != 0;
+                const bool has_native_lid = (be->capabilities() & CAP_LANGUAGE_DETECT) != 0;
                 const bool lid_disabled = rp.lid_backend == "off" || rp.lid_backend == "none";
 
                 // Compute slices.
                 int effective_chunk_seconds = rp.chunk_seconds;
-                if (rp.vad && !rp.chunk_seconds_explicit && (backend->capabilities() & CAP_UNBOUNDED_INPUT))
+                if (rp.vad && !rp.chunk_seconds_explicit && (be->capabilities() & CAP_UNBOUNDED_INPUT))
                     effective_chunk_seconds = 0;
-                const int vad_cap = backend->vad_slice_cap_seconds();
+                const int vad_cap = be->vad_slice_cap_seconds();
                 if (vad_cap > 0 && !rp.chunk_seconds_explicit &&
                     (effective_chunk_seconds == 0 || effective_chunk_seconds > vad_cap))
                     effective_chunk_seconds = vad_cap;
@@ -1216,23 +1237,23 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                 result.language = rp.language;
 
                 const bool want_align = need_timestamps && !rp.aligner_model.empty() &&
-                    ((backend->capabilities() & CAP_TIMESTAMPS_CTC) || rp.force_aligner);
+                    ((be->capabilities() & CAP_TIMESTAMPS_CTC) || rp.force_aligner);
 
                 // Use internal VAD path for whisper on short-to-medium audio.
                 const double max_internal_vad_s = 600.0;
-                const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL) &&
+                const bool use_internal_vad = had_vad && (be->capabilities() & CAP_VAD_INTERNAL) &&
                     (double)n_samples / SR <= max_internal_vad_s;
 
                 if (use_internal_vad) {
                     rp.vad = true;
                     rp.vad_model = saved_vad_model;
                     if (rp.vad_model.empty()) rp.vad_model = crispasr_resolve_vad_model(rp);
-                    result.segs = backend->transcribe(pcmf32.data(), n_samples, 0, rp);
+                    result.segs = be->transcribe(pcmf32.data(), n_samples, 0, rp);
                 } else {
                     // Per-slice transcription (same as sync path).
                     const float kChunkContextS = rp.chunk_overlap_seconds;
                     constexpr int64_t kBoundaryToleranceCs = 20;
-                    const bool backend_ok = crispasr_chunk_context::backend_allows_chunk_context(backend->name());
+                    const bool backend_ok = crispasr_chunk_context::backend_allows_chunk_context(be->name());
                     const bool use_chunk_ctx = crispasr_chunk_context::should_use_chunk_context(
                         effective_chunk_seconds, slices.size(), kChunkContextS, had_vad, backend_ok);
 
@@ -1246,7 +1267,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                             ext_end = std::min(n_samples, sl.end + ctx_s);
                         }
                         const int64_t ext_t0_cs = (int64_t)((double)ext_start / SR * 100.0);
-                        auto segs = backend->transcribe(pcmf32.data() + ext_start, ext_end - ext_start, ext_t0_cs, rp);
+                        auto segs = be->transcribe(pcmf32.data() + ext_start, ext_end - ext_start, ext_t0_cs, rp);
 
                         if (use_chunk_ctx && !segs.empty()) {
                             const int64_t left_cs = (i == 0) ? 0 : (sl.t0_cs - kBoundaryToleranceCs);
@@ -1330,8 +1351,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         job_worker.start(params.async_workers, job_store, transcribe_fn);
         crispasr_async_cleanup_start(job_store, cleanup_thread, cleanup_shutdown);
 
-        fprintf(stderr, "crispasr-server: async job queue enabled (%d workers, max %d pending)\n",
-                params.async_workers, params.async_max_pending);
+        int independent = (int)owned_backends.size();
+        fprintf(stderr, "crispasr-server: async job queue enabled (%d workers, %d independent model copies, max %d pending)\n",
+                params.async_workers, independent, params.async_max_pending);
     }
 
     Server svr;
