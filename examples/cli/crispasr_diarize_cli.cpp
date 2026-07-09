@@ -302,7 +302,13 @@ void assign_speakers_from_global_sherpa(std::vector<crispasr_segment>& segs, con
     // Phase 1: assign dominant speaker to each whole ASR segment
     assign_speakers_from_sherpa(segs, sherpa_segs);
 
-    // Phase 2: split segments at speaker-turn boundaries using word timestamps
+    // Phase 2: split segments at speaker-turn boundaries using word timestamps.
+    // Mirrors the pyannote path's stability-filtered splitting so that
+    // imprecise whisper token timestamps don't produce single-word
+    // speaker stubs or sub-segments with timestamps outside the original
+    // segment range.
+    constexpr int64_t MIN_RUN_CS = 50; // 500 ms — matches pyannote path
+
     std::vector<crispasr_segment> out;
     out.reserve(segs.size());
 
@@ -320,7 +326,6 @@ void assign_speakers_from_global_sherpa(std::vector<crispasr_segment>& segs, con
                 continue;
             const double w0 = (double)w.t0 / 100.0;
             const double w1 = (double)w.t1 / 100.0;
-            // Find the sherpa segment with maximum overlap
             int best = -1;
             double best_ov = 0.0;
             for (const auto& s : sherpa_segs) {
@@ -352,44 +357,111 @@ void assign_speakers_from_global_sherpa(std::vector<crispasr_segment>& segs, con
             }
         }
 
-        // Check if all words have the same speaker — skip splitting if so
-        bool all_same = true;
-        for (size_t i = 1; i < word_spk.size(); i++) {
-            if (word_spk[i] != word_spk[0]) {
-                all_same = false;
+        // Build initial runs as [start, end_exclusive, speaker] triples.
+        struct Run {
+            size_t s, e;
+            int spk;
+        };
+        std::vector<Run> runs;
+        {
+            size_t rs = 0;
+            while (rs < word_spk.size()) {
+                const int rspk = word_spk[rs];
+                size_t re = rs + 1;
+                while (re < word_spk.size() && word_spk[re] == rspk)
+                    re++;
+                runs.push_back({rs, re, rspk});
+                rs = re;
+            }
+        }
+
+        // Stability filter: fold any run shorter than MIN_RUN_CS into
+        // the longer adjacent run. Repeat until stable.
+        auto word_duration_cs = [&](size_t a, size_t b /*exclusive*/) -> int64_t {
+            if (b <= a || b > word_spk.size())
+                return 0;
+            int64_t t0 = seg.words[a].t0;
+            int64_t t1 = seg.words[b - 1].t1;
+            if (t0 <= 0)
+                t0 = seg.t0;
+            if (t1 <= 0)
+                t1 = seg.t1;
+            return std::max<int64_t>(0, t1 - t0);
+        };
+        bool changed = true;
+        while (changed && runs.size() >= 2) {
+            changed = false;
+            for (size_t i = 0; i < runs.size(); i++) {
+                if (word_duration_cs(runs[i].s, runs[i].e) >= MIN_RUN_CS)
+                    continue;
+                int merge_into = -1;
+                if (i == 0)
+                    merge_into = (int)i + 1;
+                else if (i == runs.size() - 1)
+                    merge_into = (int)i - 1;
+                else {
+                    int64_t prev_dur = word_duration_cs(runs[i - 1].s, runs[i - 1].e);
+                    int64_t next_dur = word_duration_cs(runs[i + 1].s, runs[i + 1].e);
+                    merge_into = (prev_dur >= next_dur) ? (int)i - 1 : (int)i + 1;
+                }
+                if (merge_into == (int)i + 1)
+                    runs[i + 1].s = runs[i].s;
+                else if (merge_into == (int)i - 1)
+                    runs[i - 1].e = runs[i].e;
+                runs.erase(runs.begin() + i);
+                changed = true;
                 break;
             }
         }
-        if (all_same) {
+
+        // Check if all runs have the same speaker after filtering
+        int first_spk = -1;
+        bool multi = false;
+        for (const auto& r : runs) {
+            if (r.spk < 0)
+                continue;
+            if (first_spk < 0)
+                first_spk = r.spk;
+            else if (r.spk != first_spk) {
+                multi = true;
+                break;
+            }
+        }
+        if (!multi) {
             out.push_back(std::move(seg));
             continue;
         }
 
-        // Split at speaker transitions
-        size_t run_start = 0;
-        for (size_t i = 1; i <= seg.words.size(); i++) {
-            if (i < seg.words.size() && word_spk[i] == word_spk[run_start])
-                continue;
-            // Emit sub-segment [run_start, i)
+        // Emit one sub-segment per run, clamping timestamps to the
+        // original segment range so imprecise word-level timestamps
+        // can't produce overlaps with neighbouring segments.
+        for (size_t ri = 0; ri < runs.size(); ri++) {
+            const size_t run_start = runs[ri].s;
+            const size_t run_end = runs[ri].e;
+            const int run_spk = runs[ri].spk;
+
             crispasr_segment sub;
-            sub.t0 = seg.words[run_start].t0 > 0 ? seg.words[run_start].t0 : seg.t0;
-            sub.t1 = seg.words[i - 1].t1 > 0 ? seg.words[i - 1].t1 : seg.t1;
-            if (word_spk[run_start] >= 0)
-                sub.speaker = "(speaker " + std::to_string(word_spk[run_start]) + ") ";
+            int64_t raw_t0 = seg.words[run_start].t0 > 0 ? seg.words[run_start].t0 : seg.t0;
+            int64_t raw_t1 = seg.words[run_end - 1].t1 > 0 ? seg.words[run_end - 1].t1 : seg.t1;
+            sub.t0 = std::max(raw_t0, seg.t0);
+            sub.t1 = std::min(raw_t1, seg.t1);
+            if (sub.t1 <= sub.t0) {
+                sub.t0 = seg.t0;
+                sub.t1 = seg.t1;
+            }
+            sub.speaker_turn_next = (ri + 1 < runs.size());
+            if (run_spk >= 0)
+                sub.speaker = "(speaker " + std::to_string(run_spk) + ") ";
             else
                 sub.speaker = seg.speaker;
-            // Rebuild text from words
-            std::string txt;
-            for (size_t j = run_start; j < i; j++) {
-                if (!txt.empty())
-                    txt += ' ';
-                txt += seg.words[j].text;
+            for (size_t j = run_start; j < run_end; j++) {
+                if (!sub.text.empty())
+                    sub.text += ' ';
+                sub.text += seg.words[j].text;
             }
-            sub.text = txt;
-            // Copy word data for the sub-segment
-            sub.words.assign(seg.words.begin() + run_start, seg.words.begin() + i);
+            sub.words.assign(seg.words.begin() + run_start, seg.words.begin() + run_end);
+            sub.tokens.clear();
             out.push_back(std::move(sub));
-            run_start = i;
         }
     }
 

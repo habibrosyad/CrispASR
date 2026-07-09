@@ -904,7 +904,8 @@ void crispasr_print_stdout(const std::vector<crispasr_disp_segment>& segs, bool 
 std::string crispasr_segments_to_text(const std::vector<crispasr_segment>& segs) {
     std::string out;
     for (const auto& s : segs) {
-        if (s.text.empty()) continue;
+        if (s.text.empty())
+            continue;
         if (!out.empty())
             out += ' ';
         out += s.text;

@@ -40,8 +40,8 @@
 #include <vector>
 
 // Forward declaration from crispasr_server.cpp (shared helper).
-bool read_audio_data(const std::string& fname, std::vector<float>& pcmf32,
-                     std::vector<std::vector<float>>& pcmf32s, bool stereo);
+bool read_audio_data(const std::string& fname, std::vector<float>& pcmf32, std::vector<std::vector<float>>& pcmf32s,
+                     bool stereo);
 
 // ---------------------------------------------------------------------------
 // Job record
@@ -49,16 +49,16 @@ bool read_audio_data(const std::string& fname, std::vector<float>& pcmf32,
 
 struct CrispasrJob {
     std::string id;
-    std::string status;      // queued | processing | completed | failed
-    int64_t     created_at = 0;
-    int64_t     started_at = 0;
-    int64_t     completed_at = 0;
+    std::string status; // queued | processing | completed | failed
+    int64_t created_at = 0;
+    int64_t started_at = 0;
+    int64_t completed_at = 0;
     std::string audio_path;
-    std::string request_params;  // JSON
+    std::string request_params; // JSON
     std::string response_format;
-    std::string result;          // JSON
+    std::string result; // JSON
     std::string error;
-    double      progress = 0.0;
+    double progress = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -92,11 +92,11 @@ public:
 
     bool open(const std::string& db_path) {
         std::lock_guard<std::mutex> lock(mtx_);
-        if (db_) return true;
+        if (db_)
+            return true;
         int rc = sqlite3_open(db_path.c_str(), &db_);
         if (rc != SQLITE_OK) {
-            fprintf(stderr, "crispasr-async: failed to open DB '%s': %s\n",
-                    db_path.c_str(), sqlite3_errmsg(db_));
+            fprintf(stderr, "crispasr-async: failed to open DB '%s': %s\n", db_path.c_str(), sqlite3_errmsg(db_));
             db_ = nullptr;
             return false;
         }
@@ -126,13 +126,14 @@ public:
         }
     }
 
-    bool create_job(const std::string& id, const std::string& audio_path,
-                    const std::string& params_json, const std::string& response_format) {
+    bool create_job(const std::string& id, const std::string& audio_path, const std::string& params_json,
+                    const std::string& response_format) {
         std::lock_guard<std::mutex> lock(mtx_);
         const char* sql = "INSERT INTO jobs (id, status, created_at, audio_path, request_params, response_format) "
                           "VALUES (?, 'queued', ?, ?, ?, ?)";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
         int64_t now = epoch_seconds();
         sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 2, now);
@@ -151,7 +152,8 @@ public:
                           "audio_path, request_params, response_format, result, error, progress "
                           "FROM jobs WHERE id = ?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return job;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return job;
         sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             job = row_to_job(stmt);
@@ -170,7 +172,8 @@ public:
                           "id, status, created_at, started_at, completed_at, "
                           "audio_path, request_params, response_format, result, error, progress";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return job;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return job;
         sqlite3_bind_int64(stmt, 1, now);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             job = row_to_job(stmt);
@@ -183,7 +186,8 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         const char* sql = "UPDATE jobs SET progress=? WHERE id=?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
         sqlite3_bind_double(stmt, 1, progress);
         sqlite3_bind_text(stmt, 2, id.c_str(), -1, SQLITE_TRANSIENT);
         bool ok = sqlite3_step(stmt) == SQLITE_DONE;
@@ -195,7 +199,8 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         const char* sql = "UPDATE jobs SET status='completed', completed_at=?, progress=1.0, result=? WHERE id=?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
         sqlite3_bind_int64(stmt, 1, epoch_seconds());
         sqlite3_bind_text(stmt, 2, result_json.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, id.c_str(), -1, SQLITE_TRANSIENT);
@@ -208,7 +213,8 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         const char* sql = "UPDATE jobs SET status='failed', completed_at=?, error=? WHERE id=?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
         sqlite3_bind_int64(stmt, 1, epoch_seconds());
         sqlite3_bind_text(stmt, 2, error.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, id.c_str(), -1, SQLITE_TRANSIENT);
@@ -225,12 +231,14 @@ public:
             sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
             if (sqlite3_step(stmt) == SQLITE_ROW) {
                 const char* p = (const char*)sqlite3_column_text(stmt, 0);
-                if (p) audio_path_out = p;
+                if (p)
+                    audio_path_out = p;
             }
             sqlite3_finalize(stmt);
         }
         const char* sql_del = "DELETE FROM jobs WHERE id=?";
-        if (sqlite3_prepare_v2(db_, sql_del, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql_del, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
         sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db_) > 0;
         sqlite3_finalize(stmt);
@@ -255,12 +263,14 @@ public:
         // Find all processing jobs — re-queue if audio exists, fail otherwise.
         const char* sql = "SELECT id, audio_path FROM jobs WHERE status='processing'";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return;
         std::vector<std::pair<std::string, std::string>> dangling;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* id = (const char*)sqlite3_column_text(stmt, 0);
             const char* path = (const char*)sqlite3_column_text(stmt, 1);
-            if (id) dangling.emplace_back(id, path ? path : "");
+            if (id)
+                dangling.emplace_back(id, path ? path : "");
         }
         sqlite3_finalize(stmt);
 
@@ -270,8 +280,9 @@ public:
                 exec_bind("UPDATE jobs SET status='queued', started_at=NULL, progress=0.0 WHERE id=?", id);
                 fprintf(stderr, "crispasr-async: recovered dangling job %s -> re-queued\n", id.c_str());
             } else {
-                exec_bind("UPDATE jobs SET status='failed', completed_at=?, error='server restarted, audio lost' WHERE id=?",
-                          epoch_seconds(), id);
+                exec_bind(
+                    "UPDATE jobs SET status='failed', completed_at=?, error='server restarted, audio lost' WHERE id=?",
+                    epoch_seconds(), id);
                 fprintf(stderr, "crispasr-async: recovered dangling job %s -> failed (audio missing)\n", id.c_str());
             }
         }
@@ -289,14 +300,16 @@ public:
             sqlite3_bind_int64(stmt, 1, cutoff);
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 const char* p = (const char*)sqlite3_column_text(stmt, 0);
-                if (p && *p) paths.emplace_back(p);
+                if (p && *p)
+                    paths.emplace_back(p);
             }
             sqlite3_finalize(stmt);
         }
 
         // Delete rows.
         const char* sql_del = "DELETE FROM jobs WHERE status IN ('completed','failed') AND completed_at < ?";
-        if (sqlite3_prepare_v2(db_, sql_del, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+        if (sqlite3_prepare_v2(db_, sql_del, -1, &stmt, nullptr) != SQLITE_OK)
+            return 0;
         sqlite3_bind_int64(stmt, 1, cutoff);
         sqlite3_step(stmt);
         int deleted = sqlite3_changes(db_);
@@ -316,7 +329,8 @@ private:
 
     static int64_t epoch_seconds() {
         return (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
     }
 
     void exec(const char* sql) {
@@ -353,17 +367,17 @@ private:
             const char* p = (const char*)sqlite3_column_text(stmt, col);
             return p ? p : "";
         };
-        j.id              = text_col(0);
-        j.status          = text_col(1);
-        j.created_at      = sqlite3_column_int64(stmt, 2);
-        j.started_at      = sqlite3_column_int64(stmt, 3);
-        j.completed_at    = sqlite3_column_int64(stmt, 4);
-        j.audio_path      = text_col(5);
-        j.request_params  = text_col(6);
+        j.id = text_col(0);
+        j.status = text_col(1);
+        j.created_at = sqlite3_column_int64(stmt, 2);
+        j.started_at = sqlite3_column_int64(stmt, 3);
+        j.completed_at = sqlite3_column_int64(stmt, 4);
+        j.audio_path = text_col(5);
+        j.request_params = text_col(6);
         j.response_format = text_col(7);
-        j.result          = text_col(8);
-        j.error           = text_col(9);
-        j.progress        = sqlite3_column_double(stmt, 10);
+        j.result = text_col(8);
+        j.error = text_col(9);
+        j.progress = sqlite3_column_double(stmt, 10);
         return j;
     }
 };
@@ -374,10 +388,8 @@ private:
 
 class CrispasrJobWorker {
 public:
-    using TranscribeFn = std::function<transcription_result(int worker_id,
-                                                            const std::string& audio_path,
-                                                            const std::string& params_json,
-                                                            const std::string& job_id)>;
+    using TranscribeFn = std::function<transcription_result(int worker_id, const std::string& audio_path,
+                                                            const std::string& params_json, const std::string& job_id)>;
 
     CrispasrJobWorker() = default;
     ~CrispasrJobWorker() { stop(); }
@@ -399,14 +411,13 @@ public:
         shutdown_.store(true);
         cv_.notify_all();
         for (auto& t : workers_) {
-            if (t.joinable()) t.join();
+            if (t.joinable())
+                t.join();
         }
         workers_.clear();
     }
 
-    void notify() {
-        cv_.notify_one();
-    }
+    void notify() { cv_.notify_one(); }
 
     void request_cancel(const std::string& job_id) {
         std::lock_guard<std::mutex> lock(cancel_mtx_);
@@ -440,9 +451,7 @@ private:
             CrispasrJob job = store_->claim_next();
             if (job.id.empty()) {
                 std::unique_lock<std::mutex> lock(wait_mtx_);
-                cv_.wait_for(lock, std::chrono::seconds(2), [this] {
-                    return shutdown_.load();
-                });
+                cv_.wait_for(lock, std::chrono::seconds(2), [this] { return shutdown_.load(); });
                 continue;
             }
 
@@ -490,23 +499,29 @@ private:
         }
     }
 
-    static std::string format_result(const transcription_result& r,
-                                      const std::string& response_format,
-                                      const std::string& params_json) {
+    static std::string format_result(const transcription_result& r, const std::string& response_format,
+                                     const std::string& params_json) {
         auto json_bool = [&](const char* key, bool def) -> bool {
             std::string needle = std::string("\"") + key + "\":";
             auto pos = params_json.find(needle);
-            if (pos == std::string::npos) return def;
+            if (pos == std::string::npos)
+                return def;
             pos += needle.size();
-            while (pos < params_json.size() && params_json[pos] == ' ') pos++;
+            while (pos < params_json.size() && params_json[pos] == ' ')
+                pos++;
             return pos < params_json.size() && params_json[pos] == 't';
         };
         auto json_int = [&](const char* key, int def) -> int {
             std::string needle = std::string("\"") + key + "\":";
             auto pos = params_json.find(needle);
-            if (pos == std::string::npos) return def;
+            if (pos == std::string::npos)
+                return def;
             pos += needle.size();
-            try { return std::stoi(params_json.substr(pos)); } catch (...) { return def; }
+            try {
+                return std::stoi(params_json.substr(pos));
+            } catch (...) {
+                return def;
+            }
         };
 
         const std::string task = json_bool("translate", false) ? "translate" : "transcribe";
@@ -520,11 +535,9 @@ private:
         } else if (response_format == "vtt") {
             return crispasr_segments_to_vtt(r.segs, max_len, split_on_punct);
         } else if (response_format == "verbose_json") {
-            return crispasr_segments_to_openai_verbose_json(
-                r.segs, r.duration_s, r.language, task, 0.0f);
+            return crispasr_segments_to_openai_verbose_json(r.segs, r.duration_s, r.language, task, 0.0f);
         } else if (response_format == "diarized_json") {
-            return crispasr_segments_to_diarized_json(
-                r.segs, r.duration_s, r.language, task, 0.0f);
+            return crispasr_segments_to_diarized_json(r.segs, r.duration_s, r.language, task, 0.0f);
         } else {
             return crispasr_segments_to_openai_json(r.segs);
         }
@@ -535,8 +548,8 @@ private:
 // Cleanup thread
 // ---------------------------------------------------------------------------
 
-inline void crispasr_async_cleanup_start(CrispasrJobStore& store, std::thread& thread,
-                                          std::atomic<bool>& shutdown, int64_t max_age_seconds = 86400) {
+inline void crispasr_async_cleanup_start(CrispasrJobStore& store, std::thread& thread, std::atomic<bool>& shutdown,
+                                         int64_t max_age_seconds = 86400) {
     shutdown.store(false);
     thread = std::thread([&store, &shutdown, max_age_seconds] {
         // Run recovery on startup.
@@ -545,7 +558,8 @@ inline void crispasr_async_cleanup_start(CrispasrJobStore& store, std::thread& t
         while (!shutdown.load()) {
             for (int i = 0; i < 60 && !shutdown.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::seconds(10));
-            if (shutdown.load()) break;
+            if (shutdown.load())
+                break;
             int n = store.cleanup_expired(max_age_seconds);
             if (n > 0)
                 fprintf(stderr, "crispasr-async: cleaned up %d expired job(s)\n", n);
@@ -555,5 +569,6 @@ inline void crispasr_async_cleanup_start(CrispasrJobStore& store, std::thread& t
 
 inline void crispasr_async_cleanup_stop(std::thread& thread, std::atomic<bool>& shutdown) {
     shutdown.store(true);
-    if (thread.joinable()) thread.join();
+    if (thread.joinable())
+        thread.join();
 }

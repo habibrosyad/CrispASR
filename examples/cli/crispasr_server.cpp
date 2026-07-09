@@ -495,7 +495,7 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         // 30s window — fall through to per-slice for longer audio.
         const double max_internal_vad_duration_s = 600.0;
         const bool use_internal_vad = had_vad && (backend->capabilities() & CAP_VAD_INTERNAL) &&
-            (double)n_samples / SR <= max_internal_vad_duration_s;
+                                      (double)n_samples / SR <= max_internal_vad_duration_s;
 
         // Stitching path: combine VAD slices into one buffer with 0.1s silence
         // gaps and transcribe as a single call. Opt-in only (vad_stitch),
@@ -503,7 +503,7 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         // produces cleaner timestamps, diarization, and capitalization.
         const double max_stitch_duration_s = 600.0;
         const bool use_stitch = !use_internal_vad && had_vad && slices.size() > 1 && rp.vad_stitch &&
-            (double)n_samples / SR <= max_stitch_duration_s;
+                                (double)n_samples / SR <= max_stitch_duration_s;
 
         if (use_internal_vad) {
             // Re-enable VAD for the backend's internal handler.
@@ -527,8 +527,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     const int s = (int)((double)seg.t0 / 100.0 * SR);
                     const int e = std::min(n_samples, (int)((double)seg.t1 / 100.0 * SR));
                     if (e > s) {
-                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + s, e - s,
-                                                        seg.t0, rp.n_threads);
+                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + s, e - s, seg.t0,
+                                                        rp.n_threads);
                         if (!words.empty()) {
                             seg.t0 = words.front().t0;
                             seg.t1 = words.back().t1;
@@ -545,7 +545,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                 if (rp.diarize_method == "pyannote" && !pcmf32.empty())
                     crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
                 CrispasrSherpaCache sherpa_cache;
-                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" ||
+                     rp.diarize_method == "ecapa") &&
                     !pcmf32.empty())
                     crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
                 const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
@@ -602,8 +603,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                     const int s = (int)((double)seg.t0 / 100.0 * SR);
                     const int e = std::min(n_samples, (int)((double)seg.t1 / 100.0 * SR));
                     if (e > s) {
-                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + s, e - s,
-                                                        seg.t0, rp.n_threads);
+                        auto words = crispasr_ctc_align(rp.aligner_model, seg.text, pcmf32.data() + s, e - s, seg.t0,
+                                                        rp.n_threads);
                         if (!words.empty()) {
                             seg.t0 = words.front().t0;
                             seg.t1 = words.back().t1;
@@ -620,7 +621,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                 if (rp.diarize_method == "pyannote" && !pcmf32.empty())
                     crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
                 CrispasrSherpaCache sherpa_cache;
-                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" ||
+                     rp.diarize_method == "ecapa") &&
                     !pcmf32.empty())
                     crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
                 const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
@@ -730,9 +732,9 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                             seg.t1 = seg.words.back().t1;
                         }
                     }
-                    segs.erase(
-                        std::remove_if(segs.begin(), segs.end(), [](const crispasr_segment& s) { return s.text.empty(); }),
-                        segs.end());
+                    segs.erase(std::remove_if(segs.begin(), segs.end(),
+                                              [](const crispasr_segment& s) { return s.text.empty(); }),
+                               segs.end());
                 }
 
                 if (want_align) {
@@ -775,8 +777,8 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
                 if (!rp.no_prints && slices.size() > 1) {
                     auto tc1 = std::chrono::steady_clock::now();
                     double slice_s = std::chrono::duration<double>(tc1 - tc0).count();
-                    fprintf(stderr, "crispasr-server: slice %zu/%zu done (%.1fs audio in %.1fs)\n",
-                            i + 1, slices.size(), (sl.end - sl.start) / (double)SR, slice_s);
+                    fprintf(stderr, "crispasr-server: slice %zu/%zu done (%.1fs audio in %.1fs)\n", i + 1,
+                            slices.size(), (sl.end - sl.start) / (double)SR, slice_s);
                 }
             }
 
@@ -1075,11 +1077,11 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     // so they can run inference concurrently without contention.
     struct WorkerBackend {
         CrispasrBackend* be;
-        std::mutex*      mtx;
+        std::mutex* mtx;
     };
     std::vector<WorkerBackend> worker_backends;
     std::vector<std::unique_ptr<CrispasrBackend>> owned_backends;
-    std::vector<std::unique_ptr<std::mutex>>       owned_mutexes;
+    std::vector<std::unique_ptr<std::mutex>> owned_mutexes;
 
     if (async_enabled) {
         std::string async_dir = scratch_dir() + "/async";
@@ -1136,43 +1138,60 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             auto json_str = [&](const char* key) -> std::string {
                 std::string needle = std::string("\"") + key + "\":\"";
                 auto pos = params_json.find(needle);
-                if (pos == std::string::npos) return "";
+                if (pos == std::string::npos)
+                    return "";
                 pos += needle.size();
                 auto end = params_json.find('"', pos);
-                if (end == std::string::npos) return "";
+                if (end == std::string::npos)
+                    return "";
                 return params_json.substr(pos, end - pos);
             };
             auto json_bool = [&](const char* key, bool def) -> bool {
                 std::string needle = std::string("\"") + key + "\":";
                 auto pos = params_json.find(needle);
-                if (pos == std::string::npos) return def;
+                if (pos == std::string::npos)
+                    return def;
                 pos += needle.size();
-                while (pos < params_json.size() && params_json[pos] == ' ') pos++;
+                while (pos < params_json.size() && params_json[pos] == ' ')
+                    pos++;
                 return pos < params_json.size() && params_json[pos] == 't';
             };
             auto json_float = [&](const char* key, float def) -> float {
                 std::string needle = std::string("\"") + key + "\":";
                 auto pos = params_json.find(needle);
-                if (pos == std::string::npos) return def;
+                if (pos == std::string::npos)
+                    return def;
                 pos += needle.size();
-                try { return std::stof(params_json.substr(pos)); } catch (...) { return def; }
+                try {
+                    return std::stof(params_json.substr(pos));
+                } catch (...) {
+                    return def;
+                }
             };
             auto json_int = [&](const char* key, int def) -> int {
                 std::string needle = std::string("\"") + key + "\":";
                 auto pos = params_json.find(needle);
-                if (pos == std::string::npos) return def;
+                if (pos == std::string::npos)
+                    return def;
                 pos += needle.size();
-                try { return std::stoi(params_json.substr(pos)); } catch (...) { return def; }
+                try {
+                    return std::stoi(params_json.substr(pos));
+                } catch (...) {
+                    return def;
+                }
             };
 
             std::string lang = json_str("language");
-            if (!lang.empty()) rp.language = lang;
+            if (!lang.empty())
+                rp.language = lang;
             rp.translate = json_bool("translate", rp.translate);
             rp.diarize = json_bool("diarize", rp.diarize);
             std::string dm = json_str("diarize_method");
-            if (!dm.empty()) rp.diarize_method = dm;
+            if (!dm.empty())
+                rp.diarize_method = dm;
             std::string de = json_str("diarize_embedder");
-            if (!de.empty()) rp.diarize_embedder = de;
+            if (!de.empty())
+                rp.diarize_embedder = de;
             rp.diarize_cluster_threshold = json_float("diarize_cluster_threshold", rp.diarize_cluster_threshold);
             rp.diarize_max_speakers = json_int("diarize_max_speakers", rp.diarize_max_speakers);
             rp.vad = json_bool("vad", rp.vad);
@@ -1181,9 +1200,11 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             rp.split_on_punct = json_bool("split_on_punct", rp.split_on_punct);
             rp.max_len = json_int("max_len", rp.max_len);
             std::string hotwords = json_str("hotwords");
-            if (!hotwords.empty()) rp.hotwords = hotwords;
+            if (!hotwords.empty())
+                rp.hotwords = hotwords;
             std::string prompt = json_str("prompt");
-            if (!prompt.empty()) rp.prompt = prompt;
+            if (!prompt.empty())
+                rp.prompt = prompt;
 
             const bool need_timestamps = true; // always store full data
 
@@ -1212,7 +1233,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                     (effective_chunk_seconds == 0 || effective_chunk_seconds > vad_cap))
                     effective_chunk_seconds = vad_cap;
 
-                const auto slices = crispasr_compute_audio_slices(pcmf32.data(), n_samples, SR, effective_chunk_seconds, rp);
+                const auto slices =
+                    crispasr_compute_audio_slices(pcmf32.data(), n_samples, SR, effective_chunk_seconds, rp);
                 if (slices.empty()) {
                     result.ok = true;
                     return result;
@@ -1237,17 +1259,18 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                 result.language = rp.language;
 
                 const bool want_align = need_timestamps && !rp.aligner_model.empty() &&
-                    ((be->capabilities() & CAP_TIMESTAMPS_CTC) || rp.force_aligner);
+                                        ((be->capabilities() & CAP_TIMESTAMPS_CTC) || rp.force_aligner);
 
                 // Use internal VAD path for whisper on short-to-medium audio.
                 const double max_internal_vad_s = 600.0;
-                const bool use_internal_vad = had_vad && (be->capabilities() & CAP_VAD_INTERNAL) &&
-                    (double)n_samples / SR <= max_internal_vad_s;
+                const bool use_internal_vad =
+                    had_vad && (be->capabilities() & CAP_VAD_INTERNAL) && (double)n_samples / SR <= max_internal_vad_s;
 
                 if (use_internal_vad) {
                     rp.vad = true;
                     rp.vad_model = saved_vad_model;
-                    if (rp.vad_model.empty()) rp.vad_model = crispasr_resolve_vad_model(rp);
+                    if (rp.vad_model.empty())
+                        rp.vad_model = crispasr_resolve_vad_model(rp);
                     result.segs = be->transcribe(pcmf32.data(), n_samples, 0, rp);
                 } else {
                     // Per-slice transcription (same as sync path).
@@ -1271,33 +1294,43 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
                         if (use_chunk_ctx && !segs.empty()) {
                             const int64_t left_cs = (i == 0) ? 0 : (sl.t0_cs - kBoundaryToleranceCs);
-                            const int64_t right_cs = (i == slices.size() - 1) ? INT64_MAX : (sl.t1_cs + kBoundaryToleranceCs);
+                            const int64_t right_cs =
+                                (i == slices.size() - 1) ? INT64_MAX : (sl.t1_cs + kBoundaryToleranceCs);
                             for (auto& seg : segs) {
                                 if (seg.words.empty()) {
                                     const int64_t mid = (seg.t0 + seg.t1) / 2;
-                                    if (mid < left_cs || mid >= right_cs) seg.text.clear();
+                                    if (mid < left_cs || mid >= right_cs)
+                                        seg.text.clear();
                                     continue;
                                 }
                                 std::vector<crispasr_word> kept;
                                 for (auto& w : seg.words)
-                                    if (w.t0 >= left_cs && w.t0 < right_cs) kept.push_back(std::move(w));
+                                    if (w.t0 >= left_cs && w.t0 < right_cs)
+                                        kept.push_back(std::move(w));
                                 std::string rebuilt;
                                 for (const auto& w : kept) {
-                                    if (w.text.empty()) continue;
+                                    if (w.text.empty())
+                                        continue;
                                     if (!rebuilt.empty()) {
                                         const unsigned char pl = (unsigned char)rebuilt.back();
                                         const unsigned char cf = (unsigned char)w.text[0];
-                                        if (cf != ' ' && !(pl >= 0xE0 || cf >= 0xE0)) rebuilt += ' ';
+                                        if (cf != ' ' && !(pl >= 0xE0 || cf >= 0xE0))
+                                            rebuilt += ' ';
                                     }
                                     rebuilt += w.text;
                                 }
-                                if (!rebuilt.empty() && rebuilt[0] == ' ') rebuilt = rebuilt.substr(1);
+                                if (!rebuilt.empty() && rebuilt[0] == ' ')
+                                    rebuilt = rebuilt.substr(1);
                                 seg.text = std::move(rebuilt);
                                 seg.words = std::move(kept);
-                                if (!seg.words.empty()) { seg.t0 = seg.words.front().t0; seg.t1 = seg.words.back().t1; }
+                                if (!seg.words.empty()) {
+                                    seg.t0 = seg.words.front().t0;
+                                    seg.t1 = seg.words.back().t1;
+                                }
                             }
                             segs.erase(std::remove_if(segs.begin(), segs.end(),
-                                [](const crispasr_segment& s) { return s.text.empty(); }), segs.end());
+                                                      [](const crispasr_segment& s) { return s.text.empty(); }),
+                                       segs.end());
                         }
                         per_slice.push_back(std::move(segs));
 
@@ -1317,7 +1350,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                     if (rp.diarize_method == "pyannote" && !pcmf32.empty())
                         crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
                     CrispasrSherpaCache sherpa_cache;
-                    if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                    if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" ||
+                         rp.diarize_method == "ecapa") &&
                         !pcmf32.empty())
                         crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
                     const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
@@ -1331,13 +1365,16 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
                 // Punctuation restoration.
                 if (!rp.punctuation) {
-                    for (auto& seg : result.segs) crispasr_strip_punctuation(seg);
+                    for (auto& seg : result.segs)
+                        crispasr_strip_punctuation(seg);
                 } else if (punc_ctx.get() || pcs_ctx.get()) {
                     for (auto& seg : result.segs) {
-                        char* out = pcs_ctx.get()
-                            ? pcs_process(pcs_ctx.get(), seg.text.c_str())
-                            : fireredpunc_process(punc_ctx.get(), seg.text.c_str());
-                        if (out) { seg.text = out; free(out); }
+                        char* out = pcs_ctx.get() ? pcs_process(pcs_ctx.get(), seg.text.c_str())
+                                                  : fireredpunc_process(punc_ctx.get(), seg.text.c_str());
+                        if (out) {
+                            seg.text = out;
+                            free(out);
+                        }
                     }
                 }
             }
@@ -1352,7 +1389,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         crispasr_async_cleanup_start(job_store, cleanup_thread, cleanup_shutdown);
 
         int independent = (int)owned_backends.size();
-        fprintf(stderr, "crispasr-server: async job queue enabled (%d workers, %d independent model copies, max %d pending)\n",
+        fprintf(stderr,
+                "crispasr-server: async job queue enabled (%d workers, %d independent model copies, max %d pending)\n",
                 params.async_workers, independent, params.async_max_pending);
     }
 
@@ -1646,7 +1684,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             std::string ext;
             {
                 auto dot = audio_file.filename.rfind('.');
-                if (dot != std::string::npos) ext = audio_file.filename.substr(dot);
+                if (dot != std::string::npos)
+                    ext = audio_file.filename.substr(dot);
             }
             std::string audio_path = scratch_dir() + "/async/" + job_id + ext;
             {
@@ -1689,13 +1728,13 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             job_worker.notify();
 
             int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
             res.status = 202;
             std::ostringstream js;
             js << "{\"id\":\"" << crispasr_json_escape(job_id) << "\""
                << ",\"status\":\"queued\""
-               << ",\"created_at\":" << now
-               << ",\"progress\":0.0}";
+               << ",\"created_at\":" << now << ",\"progress\":0.0}";
             res.set_content(js.str(), "application/json");
 
             fprintf(stderr, "crispasr-server: async job %s queued\n", job_id.c_str());
@@ -1818,8 +1857,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         std::ostringstream js;
         js << "{\"id\":\"" << crispasr_json_escape(job.id) << "\""
            << ",\"status\":\"" << crispasr_json_escape(job.status) << "\""
-           << ",\"created_at\":" << job.created_at
-           << ",\"progress\":" << job.progress;
+           << ",\"created_at\":" << job.created_at << ",\"progress\":" << job.progress;
         if (job.started_at > 0)
             js << ",\"started_at\":" << job.started_at;
         if (job.completed_at > 0)
@@ -1862,9 +1900,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
         std::string audio_path;
         if (job_store.delete_job(job_id, audio_path)) {
-            if (!audio_path.empty()) std::remove(audio_path.c_str());
-            res.set_content("{\"id\":\"" + crispasr_json_escape(job_id) + "\",\"deleted\":true}",
-                            "application/json");
+            if (!audio_path.empty())
+                std::remove(audio_path.c_str());
+            res.set_content("{\"id\":\"" + crispasr_json_escape(job_id) + "\",\"deleted\":true}", "application/json");
             fprintf(stderr, "crispasr-server: async job %s deleted\n", job_id.c_str());
         } else {
             json_error(res, 500, "failed to delete job");

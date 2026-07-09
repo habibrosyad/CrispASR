@@ -1084,7 +1084,8 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             "  --wyoming-port PORT               [%-7d] server: Wyoming protocol TCP port for Home "
             "Assistant Assist (-1 off)\n",
             params.wyoming_port);
-    fprintf(stderr, "  --async-workers N                 [%-7d] server: background workers for async jobs (0 = disabled)\n",
+    fprintf(stderr,
+            "  --async-workers N                 [%-7d] server: background workers for async jobs (0 = disabled)\n",
             params.async_workers);
     fprintf(stderr, "  --async-max-pending N             [%-7d] server: max queued + processing async jobs\n",
             params.async_max_pending);
@@ -2614,12 +2615,21 @@ int main(int argc, char** argv) {
                         pyannote_cache = {};
                     }
                 }
+                CrispasrSherpaCache sherpa_cache;
+                if ((params.diarize_method == "sherpa" || params.diarize_method == "sherpa-onnx" ||
+                     params.diarize_method == "ecapa") &&
+                    !pcmf32.empty()) {
+                    if (!crispasr_compute_sherpa_cache(pcmf32.data(), (int)pcmf32.size(), params, sherpa_cache)) {
+                        sherpa_cache = {};
+                    }
+                }
                 const bool is_stereo =
                     pcmf32s.size() == 2 && !pcmf32s[0].empty() && pcmf32s[0].size() == pcmf32s[1].size();
                 const std::vector<float>& left = is_stereo ? pcmf32s[0] : pcmf32;
                 const std::vector<float>& right = is_stereo ? pcmf32s[1] : pcmf32;
                 crispasr_apply_diarize(left, right, is_stereo, /*slice_t0_cs=*/0, segs, params,
-                                       pyannote_cache.valid() ? &pyannote_cache : nullptr);
+                                       pyannote_cache.valid() ? &pyannote_cache : nullptr,
+                                       sherpa_cache.valid() ? &sherpa_cache : nullptr);
 
                 // Optional embedding-based clustering (#107 P3). When
                 // --diarize-embedder is set, build the pluggable
