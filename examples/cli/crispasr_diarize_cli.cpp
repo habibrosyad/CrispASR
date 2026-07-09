@@ -225,6 +225,7 @@ bool apply_sherpa(const std::vector<float>& mono, int64_t slice_t0_cs, std::vect
     // clang-format off
     cmd << bin
         << " --clustering.num-clusters=" << num_clusters
+        << " --clustering.cluster-threshold=" << params.diarize_cluster_threshold
         << " --segmentation.pyannote-model='" << params.sherpa_segment_model << "'"
         << " --embedding.model='" << params.sherpa_embedding_model << "'"
         << " '" << wav_path << "'";
@@ -545,9 +546,10 @@ bool crispasr_compute_sherpa_cache(const float* full_audio, int n_samples, const
 
     const int num_clusters = params.num_speakers > 0 ? params.num_speakers : params.sherpa_num_clusters;
     std::ostringstream cmd;
-    cmd << bin << " --clustering.num-clusters=" << num_clusters << " --segmentation.pyannote-model='"
-        << params.sherpa_segment_model << "'" << " --embedding.model='" << params.sherpa_embedding_model << "'" << " '"
-        << wav_path << "'";
+    cmd << bin << " --clustering.num-clusters=" << num_clusters
+        << " --clustering.cluster-threshold=" << params.diarize_cluster_threshold << " --segmentation.pyannote-model='"
+        << params.sherpa_segment_model << "'"
+        << " --embedding.model='" << params.sherpa_embedding_model << "'" << " '" << wav_path << "'";
     if (!params.no_prints)
         fprintf(stderr, "crispasr[diarize]: %s\n", cmd.str().c_str());
     cmd << " 2>/dev/null";
