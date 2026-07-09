@@ -1146,6 +1146,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             rp.diarize = json_bool("diarize", rp.diarize);
             std::string dm = json_str("diarize_method");
             if (!dm.empty()) rp.diarize_method = dm;
+            std::string de = json_str("diarize_embedder");
+            if (!de.empty()) rp.diarize_embedder = de;
+            rp.diarize_cluster_threshold = json_float("diarize_cluster_threshold", rp.diarize_cluster_threshold);
+            rp.diarize_max_speakers = json_int("diarize_max_speakers", rp.diarize_max_speakers);
             rp.vad = json_bool("vad", rp.vad);
             rp.temperature = json_float("temperature", rp.temperature);
             rp.punctuation = json_bool("punctuation", rp.punctuation);
@@ -1640,6 +1644,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             pj << ",\"diarize\":" << (rp.diarize ? "true" : "false");
             if (!rp.diarize_method.empty())
                 pj << ",\"diarize_method\":\"" << crispasr_json_escape(rp.diarize_method) << "\"";
+            if (!rp.diarize_embedder.empty())
+                pj << ",\"diarize_embedder\":\"" << crispasr_json_escape(rp.diarize_embedder) << "\"";
+            pj << ",\"diarize_cluster_threshold\":" << rp.diarize_cluster_threshold;
+            pj << ",\"diarize_max_speakers\":" << rp.diarize_max_speakers;
             pj << ",\"vad\":" << (rp.vad ? "true" : "false");
             pj << ",\"temperature\":" << rp.temperature;
             pj << ",\"punctuation\":" << (rp.punctuation ? "true" : "false");
